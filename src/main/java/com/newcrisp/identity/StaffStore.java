@@ -18,6 +18,7 @@ class StaffStore {
         jdbc.sql("INSERT INTO tenant (code, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
                 .params(code, name, now, now).update();
         long tenantId = jdbc.sql("SELECT id FROM tenant WHERE code = ?").param(code).query(Long.class).single();
+        jdbc.sql("INSERT INTO chat_routing_lock (tenant_id) VALUES (?)").param(tenantId).update();
         String staffId = UUID.randomUUID().toString();
         jdbc.sql("INSERT INTO staff_account (tenant_id, id, email, password_hash) VALUES (?, ?, ?, ?)")
                 .params(tenantId, staffId, email, passwordHash).update();

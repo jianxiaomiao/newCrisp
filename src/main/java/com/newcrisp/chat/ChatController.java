@@ -49,7 +49,9 @@ class ChatController {
                 actor.customer() ? row.state() != State.CLOSED : owner && active,
                 canSupervise, canSupervise,
                 owner && active, chat.assigneeName(row),
-                actor.customer() ? null : presence.online(row.tenantId(), row.customerId())));
+                actor.customer() ? null : presence.online(row.tenantId(), row.customerId()),
+                canSupervise ? presence.agentOnline(row.tenantId(), row.departmentId(), row.assigneeId()) : null,
+                row.queuedAt() + "Z"));
     }
 
     @GetMapping("/conversations/{id}/transfer-candidates")

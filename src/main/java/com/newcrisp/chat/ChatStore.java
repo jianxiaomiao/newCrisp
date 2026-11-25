@@ -28,9 +28,19 @@ class ChatStore {
     }
 
     boolean lockCustomer(Actor actor) {
-        return jdbc.sql("SELECT id FROM customer WHERE tenant_id = ? AND id = ? FOR UPDATE")
-                .params(actor.tenantId(), actor.id()).query(String.class).optional().isPresent();
+        var subject = jdbc.sql("SELECT guest_site_id FROM customer WHERE tenant_id = ? AND id = ? FOR UPDATE")
+                .params(actor.tenantId(), actor.id()).query((rs, row) -> new CustomerLock(rs.getString(1))).optional();
+        if (subject.isEmpty()) return false;
+        if (subject.get().site() == null) return true;
+        return jdbc.sql("""
+                SELECT EXISTS (SELECT 1 FROM guest_resume g JOIN guest_site s
+                    ON s.tenant_id = g.tenant_id AND s.id = g.site_id
+                    WHERE g.tenant_id = ? AND g.customer_id = ? AND g.linked_at IS NULL
+                      AND s.enabled AND g.expires_at > UTC_TIMESTAMP(3))
+                """).params(actor.tenantId(), actor.id()).query(Boolean.class).single();
     }
+
+    private record CustomerLock(String site) {}
 
     boolean lockStaffAccess(Actor actor) {
         return lockActiveStaff(actor.tenantId(), actor.id())
@@ -41,6 +51,40 @@ class ChatStore {
         return jdbc.sql("""
                 SELECT access_version FROM staff_account WHERE tenant_id = ? AND id = ? AND enabled FOR SHARE
                 """).params(tenant, staffId).query(Long.class).optional();
+    }
+
+    void lockRouting(long tenant) {
+        jdbc.sql("SELECT tenant_id FROM chat_routing_lock WHERE tenant_id = ? FOR UPDATE")
+                .param(tenant).query(Long.class).single();
+    }
+
+    List<RoutingCandidate> onlineCandidates(Conversation chat, Set<String> sessions, LocalDateTime now) {
+        return jdbc.sql("""
+                SELECT a.id, a.access_version FROM staff_department_role r
+                JOIN staff_account a ON a.tenant_id = r.tenant_id AND a.id = r.staff_id
+                WHERE r.tenant_id = :tenant AND r.department_id = :department AND r.role_code = 'AGENT'
+                  AND a.enabled AND a.accepting
+                  AND EXISTS (SELECT 1 FROM staff_session s WHERE s.tenant_id = a.tenant_id AND s.staff_id = a.id
+                              AND s.sid IN (:sessions) AND s.revoked_at IS NULL AND s.expires_at > :now)
+                  AND (SELECT COUNT(*) FROM conversation c WHERE c.tenant_id = a.tenant_id
+                       AND c.assignee_id = a.id AND c.status = 'ACTIVE') <
+                      COALESCE((SELECT assignment_limit FROM tenant WHERE id = :tenant), 9223372036854775807)
+                ORDER BY (SELECT COUNT(*) FROM conversation c
+                          WHERE c.tenant_id = a.tenant_id AND c.assignee_id = a.id AND c.status = 'ACTIVE'), a.id
+                """).param("tenant", chat.tenantId()).param("department", chat.departmentId())
+                .param("sessions", sessions).param("now", now)
+                .query((rs, row) -> new RoutingCandidate(rs.getString("id"), rs.getLong("access_version"))).list();
+    }
+
+    boolean lockRoutingCandidate(long tenant, RoutingCandidate candidate) {
+        return lockActiveStaff(tenant, candidate.id()).filter(version -> version == candidate.accessVersion()).isPresent();
+    }
+
+    void recordAutoAssignment(Conversation chat, String staffId, LocalDateTime now) {
+        jdbc.sql("""
+                INSERT INTO conversation_auto_assignment (tenant_id, conversation_id, staff_id, assigned_at, expected_version)
+                VALUES (?, ?, ?, ?, ?)
+                """).params(chat.tenantId(), chat.id(), staffId, now, chat.version()).update();
     }
 
     Optional<Conversation> active(Actor actor) {
@@ -92,6 +136,27 @@ class ChatStore {
         return message(chat, seq).orElseThrow();
     }
 
+    StoredMessage attach(Conversation chat, StoredMessage message, Upload upload) {
+        var info = upload.info();
+        jdbc.sql("""
+                UPDATE conversation_message SET attachment_name = ?, attachment_type = ?, attachment_size = ?, attachment_sha = ?
+                WHERE tenant_id = ? AND conversation_id = ? AND seq = ?
+                """).params(info.name(), info.type(), info.size(), upload.sha(), chat.tenantId(), chat.id(), message.seq()).update();
+        jdbc.sql("INSERT INTO conversation_attachment (tenant_id, conversation_id, seq, content) VALUES (?, ?, ?, ?)")
+                .params(chat.tenantId(), chat.id(), message.seq(), upload.content()).update();
+        return message(chat, message.seq()).orElseThrow();
+    }
+
+    Optional<FileContent> attachment(Conversation chat, long seq) {
+        return jdbc.sql("""
+                SELECT m.attachment_name, m.attachment_type, m.attachment_size, a.content
+                FROM conversation_attachment a JOIN conversation_message m
+                 ON m.tenant_id = a.tenant_id AND m.conversation_id = a.conversation_id AND m.seq = a.seq
+                WHERE a.tenant_id = ? AND a.conversation_id = ? AND a.seq = ?
+                """).params(chat.tenantId(), chat.id(), seq).query((rs, row) ->
+                new FileContent(attachmentInfo(rs), rs.getBytes("content"))).optional();
+    }
+
     List<StoredMessage> messages(Conversation chat, Long after, Long before, int limit) {
         String order = after != null ? " ASC" : " DESC";
         String boundary = after != null ? " AND seq > :seq" : before != null ? " AND seq < :seq" : "";
@@ -105,7 +170,13 @@ class ChatStore {
     private static StoredMessage message(ResultSet rs, int row) throws SQLException {
         return new StoredMessage(rs.getString("conversation_id"), rs.getLong("seq"),
                 rs.getString("customer_sender_id") != null, rs.getString("body"),
-                rs.getObject("created_at", LocalDateTime.class), rs.getString("client_message_id"), rs.getBoolean("first_send"));
+                rs.getObject("created_at", LocalDateTime.class), rs.getString("client_message_id"), rs.getBoolean("first_send"),
+                attachmentInfo(rs), rs.getBytes("attachment_sha"));
+    }
+
+    private static AttachmentInfo attachmentInfo(ResultSet rs) throws SQLException {
+        String name = rs.getString("attachment_name");
+        return name == null ? null : new AttachmentInfo(name, rs.getString("attachment_type"), rs.getInt("attachment_size"));
     }
 
     List<ListItem> list(Actor actor, View view, Set<String> departments, Cursor cursor, int limit) {
@@ -128,7 +199,7 @@ class ChatStore {
                         + "AND m.seq > " + readSeq + " AND " + sender + " IS NOT NULL)";
         String boundary = cursor == null ? "" : " AND (" + time + " " + operator + " :time OR (" + time
                 + " = :time AND c.id " + operator + " :cursorId))";
-        var statement = jdbc.sql("SELECT c.id, c.status, c.state_version, c.last_seq, c.last_customer_seq, "
+        var statement = jdbc.sql("SELECT c.id, c.status, c.state_version, c.last_seq, c.last_customer_seq, c.queued_at, "
                 + readSeq + " AS read_seq, " + time + " AS sort_time, " + unread + " AS unread, "
                 + "LEFT(m.body, 100) AS preview FROM conversation c LEFT JOIN conversation_message m "
                 + "ON m.tenant_id = c.tenant_id AND m.conversation_id = c.id AND m.seq = " + (pending ? "1" : "c.last_seq")
@@ -141,7 +212,8 @@ class ChatStore {
         return statement.query((rs, row) -> new ListItem(rs.getString("id"), State.valueOf(rs.getString("status")),
                 Long.toString(rs.getLong("state_version")), Long.toString(rs.getLong("last_seq")),
                 Long.toString(rs.getLong("last_customer_seq")), Long.toString(rs.getLong("read_seq")),
-                rs.getObject("sort_time", LocalDateTime.class) + "Z", rs.getString("preview"), rs.getLong("unread"))).list();
+                rs.getObject("sort_time", LocalDateTime.class) + "Z", rs.getObject("queued_at", LocalDateTime.class) + "Z",
+                rs.getString("preview"), rs.getLong("unread"))).list();
     }
 
     Summary summary(Actor actor) {
@@ -213,6 +285,11 @@ class ChatStore {
                 .params(chat.tenantId(), chat.id(), seq, now).update();
     }
 
+    void enqueueAssignment(Conversation chat, LocalDateTime now) {
+        jdbc.sql("INSERT INTO chat_outbox (tenant_id, conversation_id, assignment_version, next_at) VALUES (?, ?, ?, ?)")
+                .params(chat.tenantId(), chat.id(), chat.version() + 1, now).update();
+    }
+
     String assigneeName(Conversation chat) {
         if (chat.assigneeId() == null) return null;
         return jdbc.sql("SELECT display_name FROM staff_account WHERE tenant_id = ? AND id = ?")
@@ -221,18 +298,56 @@ class ChatStore {
 
     List<ActionHistory> history(Conversation chat) {
         return jdbc.sql("""
-                SELECT a.action_code, s.display_name, a.created_at, a.reason,
+                WITH activity AS (
+                    SELECT tenant_id, action_code, staff_id AS operator_id, created_at, reason,
+                           previous_assignee, new_assignee, expected_version
+                    FROM conversation_action WHERE tenant_id = :tenant AND conversation_id = :id
+                    UNION ALL
+                    SELECT tenant_id, 'AUTO', NULL, assigned_at, NULL, NULL, staff_id, expected_version
+                    FROM conversation_auto_assignment WHERE tenant_id = :tenant AND conversation_id = :id
+                )
+                SELECT a.action_code, COALESCE(s.display_name, '系统') AS operator_name, a.created_at, a.reason,
                        p.id AS previous_id, p.display_name AS previous_name, p.email AS previous_email,
                        n.id AS new_id, n.display_name AS new_name, n.email AS new_email
-                FROM conversation_action a
-                JOIN staff_account s ON s.tenant_id = a.tenant_id AND s.id = a.staff_id
+                FROM activity a
+                LEFT JOIN staff_account s ON s.tenant_id = a.tenant_id AND s.id = a.operator_id
                 LEFT JOIN staff_account p ON p.tenant_id = a.tenant_id AND p.id = a.previous_assignee AND a.action_code = 'TRANSFER'
-                LEFT JOIN staff_account n ON n.tenant_id = a.tenant_id AND n.id = a.new_assignee AND a.action_code = 'TRANSFER'
-                WHERE a.tenant_id = ? AND a.conversation_id = ? ORDER BY a.expected_version DESC LIMIT 100
-                """).params(chat.tenantId(), chat.id()).query((rs, row) -> new ActionHistory(
-                Operation.valueOf(rs.getString("action_code")), rs.getString("display_name"),
+                LEFT JOIN staff_account n ON n.tenant_id = a.tenant_id AND n.id = a.new_assignee AND a.action_code IN ('TRANSFER', 'AUTO')
+                ORDER BY a.expected_version DESC LIMIT 100
+                """).param("tenant", chat.tenantId()).param("id", chat.id()).query((rs, row) -> new ActionHistory(
+                Activity.valueOf(rs.getString("action_code")), rs.getString("operator_name"),
                 rs.getObject("created_at", LocalDateTime.class) + "Z", rs.getString("reason"),
                 historyAssignee(rs, "previous"), historyAssignee(rs, "new"))).list();
+    }
+
+    List<Long> tenantsWithWaitingDispatch() {
+        return jdbc.sql("""
+                SELECT id FROM tenant t WHERE dispatch_waiting AND status = 'ACTIVE'
+                AND EXISTS (SELECT 1 FROM conversation c WHERE c.tenant_id = t.id AND c.status = 'WAITING')
+                ORDER BY id
+                """).query(Long.class).list();
+    }
+
+    boolean hasDispatchQueue(long tenant, String department) {
+        return jdbc.sql("""
+                SELECT EXISTS (SELECT 1 FROM tenant t WHERE t.id = ? AND t.dispatch_waiting
+                    AND EXISTS (SELECT 1 FROM conversation c WHERE c.tenant_id = t.id
+                        AND c.department_id = ? AND c.status = 'WAITING'))
+                """).params(tenant, department).query(Boolean.class).single();
+    }
+
+    List<String> waitingDepartments(long tenant) {
+        return jdbc.sql("""
+                SELECT department_id FROM conversation WHERE tenant_id = ? AND status = 'WAITING'
+                GROUP BY department_id ORDER BY MIN(queued_at), department_id
+                """).param(tenant).query(String.class).list();
+    }
+
+    Optional<Conversation> nextWaiting(long tenant, String department) {
+        return jdbc.sql("""
+                SELECT * FROM conversation WHERE tenant_id = ? AND department_id = ? AND status = 'WAITING'
+                ORDER BY queued_at, id LIMIT 1 FOR UPDATE
+                """).params(tenant, department).query(ChatStore::conversation).optional();
     }
 
     private static StaffOption historyAssignee(ResultSet rs, String prefix) throws SQLException {
@@ -243,7 +358,8 @@ class ChatStore {
     List<Outbox> ready(LocalDateTime now) {
         return jdbc.sql("SELECT * FROM chat_outbox WHERE next_at <= ? ORDER BY next_at, id LIMIT 50")
                 .param(now).query((rs, row) -> new Outbox(rs.getLong("id"), rs.getLong("tenant_id"),
-                        rs.getString("conversation_id"), rs.getObject("message_seq", Long.class), rs.getInt("attempts"))).list();
+                        rs.getString("conversation_id"), rs.getObject("message_seq", Long.class), rs.getInt("attempts"),
+                        rs.getObject("assignment_version", Long.class))).list();
     }
 
     void delivered(long id) { jdbc.sql("DELETE FROM chat_outbox WHERE id = ?").param(id).update(); }

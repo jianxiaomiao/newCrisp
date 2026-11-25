@@ -82,7 +82,7 @@ class ChatWebSocket extends TextWebSocketHandler {
             if ("pong".equals(frame.type())) {
                 Actor actor = refresh(peer);
                 if (peer.confirm(frame.nonce()) && peers.get(session.getId()) == peer) {
-                    presence.confirm(session.getId(), actor, peer.access.sid());
+                    confirmPresence(peer, actor);
                 }
                 return;
             }
@@ -118,13 +118,17 @@ class ChatWebSocket extends TextWebSocketHandler {
         if (!clock.instant().isBefore(peer.authBy) || peers.get(peer.socket.getId()) != peer) throw IdentityError.unauthorized();
         peer.actor = actor;
         releaseAuthSlot(peer);
-        presence.confirm(peer.socket.getId(), actor, peer.access.sid());
-        if (peers.get(peer.socket.getId()) != peer) {
-            presence.forget(peer.socket.getId());
-            return;
-        }
+        if (!confirmPresence(peer, actor)) return;
         send(peer, new ServerFrame("ready", null, actor.id()));
         ping(peer);
+    }
+
+    private boolean confirmPresence(Peer peer, Actor actor) {
+        var id = peer.socket.getId();
+        presence.confirm(id, actor, peer.access);
+        if (peers.get(id) == peer) return true;
+        presence.forget(id);
+        return false;
     }
 
     private Actor refresh(Peer peer) {
@@ -197,9 +201,17 @@ class ChatWebSocket extends TextWebSocketHandler {
                     send(peer, new ServerFrame("sync.required", null, null));
                     continue;
                 }
-                if (message != null) {
+                if (message != null || event.assignmentVersion() != null) {
                     var current = store.find(event.tenantId(), event.conversationId(), false).orElseThrow();
-                    if (ChatService.canRead(actor, current)) send(peer, new ServerFrame("message.created", null, message));
+                    if (message != null && ChatService.canRead(actor, current)) {
+                        send(peer, new ServerFrame("message.created", null, message));
+                    }
+                    if (current.state() == State.ACTIVE && ChatService.owns(actor, current)
+                            && ((event.assignmentVersion() != null && event.assignmentVersion() == current.version())
+                            || (message != null && "CUSTOMER".equals(message.sender()) && event.sequence() > current.staffReadSeq()))) {
+                        send(peer, new ServerFrame("staff.notification", null,
+                                new Notification(current.id(), Long.toString(event.id()), event.assignmentVersion() != null)));
+                    }
                 }
                 send(peer, new ServerFrame("sync.required", null, null));
             } catch (IdentityError error) {
@@ -254,7 +266,10 @@ class ChatWebSocket extends TextWebSocketHandler {
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         Peer peer = peers.remove(session.getId());
-        if (peer != null) releaseAuthSlot(peer);
+        if (peer != null) {
+            if (peer.side == Side.STAFF) presence.forget(session.getId());
+            releaseAuthSlot(peer);
+        }
     }
 
     @Override
@@ -270,7 +285,7 @@ class ChatWebSocket extends TextWebSocketHandler {
     private void drop(Peer peer, CloseStatus status, boolean revoked) {
         peers.remove(peer.socket.getId(), peer);
         releaseAuthSlot(peer);
-        if (revoked) presence.forget(peer.socket.getId());
+        if (revoked || peer.side == Side.STAFF) presence.forget(peer.socket.getId());
         try { peer.socket.close(status); }
         catch (IOException ignored) { /* transport is already gone */ }
     }
@@ -283,6 +298,7 @@ class ChatWebSocket extends TextWebSocketHandler {
                                String text, String stateVersion, String nonce, String ticket) {}
     private record ServerFrame(String type, String requestId, Object data) {}
     private record Failure(String code, int status) {}
+    private record Notification(String conversationId, String eventId, boolean assigned) {}
 
     private static final class Peer {
         final WebSocketSession socket;

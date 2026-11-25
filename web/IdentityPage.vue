@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, shallowRef } from 'vue';
 import ChatPanel from './ChatPanel.vue';
 import TenantManagement from './TenantManagement.vue';
+import SupportAdmin from './SupportAdmin.vue';
 import { SessionError, webSession, type SessionSide } from './web-session';
 
 type StaffProfile = {
@@ -24,6 +25,9 @@ const visit = shallowRef<Visit>();
 const showLogin = ref(false);
 const signingIn = ref(false);
 const signingOut = ref(false);
+const linkingGuest = ref(false);
+const guestCode = ref('');
+const guestNotice = ref('');
 const credentials = reactive({ tenantCode: '', email: '', password: '' });
 const staff = computed(() => {
   const profile = visit.value?.user;
@@ -64,6 +68,10 @@ async function refreshProfile() {
     const user: Visit['user'] = await response.json();
     const sid = auth.currentId();
     if (current !== revision || !sid) return;
+    if (visit.value && visit.value.sid !== sid) {
+      guestCode.value = '';
+      guestNotice.value = '';
+    }
     visit.value = { sid, user };
     showLogin.value = false;
     if (customer) feedback.value = '已通过 Nexus 登录';
@@ -79,8 +87,34 @@ async function refreshProfile() {
 }
 
 function recheckAccess() {
+  guestCode.value = '';
+  guestNotice.value = '';
   visit.value = undefined;
   void refreshProfile();
+}
+
+async function linkGuest() {
+  const sid = visit.value?.sid;
+  if (!sid || linkingGuest.value) return;
+  linkingGuest.value = true;
+  guestNotice.value = '';
+  try {
+    const result = await auth.request('/api/v1/customer/guest-link', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: guestCode.value.trim() }),
+    }, sid);
+    if (!result.ok) {
+      const failure = await result.json().catch(() => null);
+      guestNotice.value = failure?.code === 'GUEST_ACTIVE_CONVERSATION_CONFLICT'
+        ? '两个身份都有进行中的会话，请先结束其中一个再接续。' : '接续码无效或已过期。';
+      return;
+    }
+    recheckAccess();
+    guestNotice.value = '访客会话已接续，可在会话列表查看。';
+  } catch {
+    guestNotice.value = '接续请求未完成，请重试。';
+  } finally {
+    linkingGuest.value = false;
+  }
 }
 
 async function login() {
@@ -100,6 +134,8 @@ async function login() {
 
 async function logout() {
   signingOut.value = true;
+  guestCode.value = '';
+  guestNotice.value = '';
   if (!customer) feedback.value = '';
   revision++;
   try {
@@ -146,6 +182,14 @@ onUnmounted(() => {
       <p v-if="staff">{{ staff.email }}</p>
       <button type="button" :disabled="signingOut" @click="logout">{{ customer ? '退出客服' : '退出登录' }}</button>
     </section>
+    <details v-if="visit && customer">
+      <summary>接续访客对话</summary>
+      <form @submit.prevent="linkGuest">
+        <label>访客接续码<input v-model="guestCode" required maxlength="90" autocomplete="off"></label>
+        <button type="submit" :disabled="linkingGuest">接续访客会话</button>
+      </form>
+    </details>
+    <p v-if="visit && customer && guestNotice" aria-live="polite">{{ guestNotice }}</p>
     <TenantManagement
       v-if="visit && admin"
       :key="visit.sid"
@@ -153,6 +197,7 @@ onUnmounted(() => {
       @notice="feedback = $event"
       @expired="recheckAccess"
     />
+    <SupportAdmin v-if="visit && admin" :key="visit.sid" :sid="visit.sid" @expired="recheckAccess" />
     <p v-if="staff && !admin && !chat">暂无部门权限，请联系租户管理员。</p>
     <ChatPanel
       v-if="chat"

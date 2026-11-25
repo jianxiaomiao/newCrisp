@@ -12,7 +12,7 @@ export default defineConfig({
         if (!entry) throw new Error('Missing Vue entry');
         const styleLinks = Object.keys(bundle).filter((name) => name.endsWith('.css'))
           .map((name) => `<link rel="stylesheet" href="/${name}">`).join('\n');
-        for (const [page, title] of [['staff', '客服工作台'], ['customer', '在线客服']]) {
+        for (const [page, title] of [['staff', '客服工作台'], ['customer', '在线客服'], ['guest', '访客客服']]) {
           this.emitFile({
             type: 'asset',
             fileName: `${page}.html`,

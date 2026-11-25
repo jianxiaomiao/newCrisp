@@ -115,8 +115,7 @@ test.describe('Nexus login against isolated MySQL', () => {
     await createMember(otherAdmin, otherAgent, password, 'AGENT');
 
     try {
-      const [agentA, agentB, manager, outsider] = await Promise.all([
-        staff(first, firstAgent, password), staff(first, secondAgent, password),
+      const [manager, outsider] = await Promise.all([
         staff(first, supervisor, password), staff(second, otherAgent, password),
       ]);
       const starts = [], usedTickets = new Set();
@@ -157,6 +156,7 @@ test.describe('Nexus login against isolated MySQL', () => {
       expect(starts).toHaveLength(2);
       expect(starts[0]).toBe(starts[1]);
 
+      const [agentA, agentB] = await Promise.all([staff(first, firstAgent, password), staff(first, secondAgent, password)]);
       const pending = await pollQueue(agentA);
       const id = pending.id;
       const path = `/api/v1/staff/conversations/${id}`;
@@ -531,10 +531,6 @@ test.describe('Nexus login against isolated MySQL', () => {
         member(admin, 'billing-manager', '外部门主管', 'SUPERVISOR', 'transfer-billing'),
         member(otherAdmin, 'outsider', '外租户客服', 'AGENT'),
       ]);
-      const [original, incoming, supervisor, otherSupervisor, outsider] = await Promise.all([
-        open(first, origin.email, password), open(first, target.email, password),
-        open(first, manager.email, password), open(first, wrongSupervisor.email, password), open(second, wrongTenant.email, password),
-      ]);
       const registration = await request.post(`${nexusApi}/api/auth/register`, {
         data: { ...customerAccount, displayName: '会话转派验收客户' },
       });
@@ -546,6 +542,10 @@ test.describe('Nexus login against isolated MySQL', () => {
       const id = await startConversation(page, initial);
       const path = `${staff}/conversations/${id}`;
       const customerPath = `/api/v1/customer/conversations/${id}`;
+      const [original, incoming, supervisor, otherSupervisor, outsider] = await Promise.all([
+        open(first, origin.email, password), open(first, target.email, password),
+        open(first, manager.email, password), open(first, wrongSupervisor.email, password), open(second, wrongTenant.email, password),
+      ]);
       await staffReplies(original, id, [firstReply]);
       const previous = (await browserApi(original, path)).data;
 
@@ -631,6 +631,192 @@ test.describe('Nexus login against isolated MySQL', () => {
       await Promise.all(contexts.map((context) => context.close()));
     }
   });
+  test('new conversations balance concurrent routing and wait locally when nobody eligible is online', async ({ browser, request }) => {
+    test.setTimeout(150_000);
+    const tenantA = { ...first, code: 'route-a', name: '自动分配甲租户' };
+    const tenantB = { ...second, code: 'route-b', name: '自动分配乙租户' };
+    const staff = '/api/v1/staff';
+    const chats = '/api/v1/customer/conversations';
+    const password = 'Route-Agent!2026';
+    const agentOne = 'route-one@example.test';
+    const agentTwo = 'route-two@example.test';
+    const otherDepartment = 'route-department@example.test';
+    const contexts = [];
+    async function context() {
+      const value = await browser.newContext({ baseURL: process.env.NEWCRISP_PUBLIC_ORIGIN });
+      contexts.push(value);
+      return value;
+    }
+    async function staffPage(tenant, email = tenant.adminEmail, credential = tenant.adminPassword) {
+      return openStaff(await context(), tenant, email, credential);
+    }
+    async function addAgent(admin, email, displayName, departmentCode = 'support') {
+      const result = await write(admin, `${staff}/members`, { departmentCode, email, password, role: 'AGENT', displayName });
+      expect(result).toMatchObject({ status: 201 });
+      return result.data.staffId;
+    }
+    async function launch(account, key, name) {
+      const login = await request.post(`${nexusApi}/api/auth/login`, { data: account });
+      expect(login.ok()).toBe(true);
+      const { accessToken } = (await login.json()).data;
+      const { sub, sid } = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64url').toString('utf8'));
+      const tab = await (await context()).newPage();
+      await tab.goto(`${nexusOrigin}/login`, { waitUntil: 'domcontentloaded' });
+      const issued = await request.post('/integrations/nexus/launch-grants', {
+        headers: { Authorization: `Bearer ${key}` },
+        data: { userId: Number(sub), sessionId: Number(sid) },
+      });
+      expect(issued.status()).toBe(201);
+      const { grant } = await issued.json();
+      await tab.evaluate(({ action, grant }) => {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = action;
+        const field = document.createElement('input');
+        field.type = 'hidden';
+        field.name = 'grant';
+        field.value = grant;
+        form.append(field);
+        document.body.append(form);
+        form.submit();
+      }, { action: `${process.env.NEWCRISP_PUBLIC_ORIGIN}/launch/nexus`, grant });
+      await expect(tab.getByRole('status')).toHaveText('已通过 Nexus 登录');
+      await expect(tab.getByText(name, { exact: true })).toBeVisible();
+      return tab;
+    }
+    const assigned = async (tab) => {
+      const response = await browserApi(tab, `${staff}/conversations?view=MINE`);
+      expect(response.status).toBe(200);
+      return response.data.items.map(({ id }) => id);
+    };
+    function detail(tab, id) { return browserApi(tab, `${chats}/${id}`); }
+
+    try {
+      await Promise.all([createTenant(request, tenantA), createTenant(request, tenantB)]);
+      const [keyA, keyB] = await Promise.all([
+        configureNexus(request, tenantA.code, nexusOrigin), configureNexus(request, tenantB.code, nexusOrigin),
+      ]);
+      const [adminA, adminB] = await Promise.all([staffPage(tenantA), staffPage(tenantB)]);
+      expect(await write(adminA, `${staff}/departments`, { code: 'route-billing', name: '非目标部门' })).toMatchObject({ status: 201 });
+      const [firstAgentId] = await Promise.all([
+        addAgent(adminA, agentOne, '甲一号'), addAgent(adminA, agentTwo, '甲二号'),
+        addAgent(adminA, otherDepartment, '外部门在线客服', 'route-billing'), addAgent(adminB, agentTwo, '乙客服'),
+      ]);
+      const [one, billing, outside] = await Promise.all([
+        staffPage(tenantA, agentOne, password), staffPage(tenantA, otherDepartment, password), staffPage(tenantB, agentTwo, password),
+      ]);
+      await Promise.all([one, billing, outside].map((tab) => expect(tab.locator('.chat-connection')).toHaveText('')));
+      await one.getByRole('button', { name: '我负责' }).click();
+
+      const accounts = Array.from({ length: 6 }, (_, i) => ({
+        email: `routing-customer-${i}@example.test`, password: 'Nexus-Routing!2026',
+      }));
+      for (const account of accounts) {
+        const registered = await request.post(`${nexusApi}/api/auth/register`, { data: { ...account, displayName: '自动分配验收' } });
+        expect(registered.ok()).toBe(true);
+      }
+
+      const seed = await launch(accounts[0], keyA, tenantA.name);
+      await expect(seed.locator('.chat-connection')).toHaveText('');
+      await seed.getByRole('textbox', { name: '消息' }).fill('仅一号客服在线时发起');
+      await seed.getByRole('button', { name: '发送', exact: true }).click();
+      await expect(seed.locator('.chat-assignee')).toHaveText('负责人 甲一号');
+      await expect(one.getByRole('button', { name: /仅一号客服在线时发起/ })).toBeVisible();
+      const [seedId] = await assigned(one);
+      const history = await browserApi(one, `${staff}/conversations/${seedId}/actions`);
+      expect(history.data).toMatchObject([{ action: 'AUTO', operator: '系统', newAssignee: { id: firstAgentId } }]);
+
+      const two = await staffPage(tenantA, agentTwo, password);
+      await expect(two.locator('.chat-connection')).toHaveText('');
+      const light = await launch(accounts[1], keyA, tenantA.name);
+      const lightId = await startConversation(light, '优先给进行中会话更少的客服');
+      expect(await detail(light, lightId)).toMatchObject({ status: 200, data: { status: 'ACTIVE', assignee: '甲二号' } });
+
+      const concurrent = await Promise.all(accounts.slice(2).map((account) => launch(account, keyA, tenantA.name)));
+      const results = await Promise.all(concurrent.flatMap((tab, index) => {
+        const payload = { text: `并发发起 ${index + 1}`, clientMessageId: randomUUID() };
+        const send = write(tab, chats, payload);
+        return index === 0 ? [send, write(tab, chats, payload)] : [send];
+      }));
+      expect(results.map(({ status }) => status).sort()).toEqual([200, 201, 201, 201, 201]);
+      const wave = results.map(({ data }) => data.message.conversationId);
+      expect(wave[0]).toBe(wave[1]);
+      expect(new Set(wave).size).toBe(4);
+      const [listOne, listTwo] = await Promise.all([assigned(one), assigned(two)]);
+      expect([listOne.length, listTwo.length]).toEqual([3, 3]);
+      expect([...listOne, ...listTwo].sort()).toEqual([seedId, lightId, ...new Set(wave)].sort());
+      expect((await browserApi(one, `${staff}/conversations?view=PENDING`)).data.items).toEqual([]);
+      expect(await assigned(billing)).toEqual([]);
+      expect(await assigned(outside)).toEqual([]);
+
+      // Cleanly close one workbench and sign the other out. Other departments and tenants are still online.
+      await one.context().close();
+      await two.getByRole('button', { name: '退出登录' }).click();
+      await expect(two.getByRole('button', { name: '登录', exact: true })).toBeVisible();
+      const [waiting, foreign] = await Promise.all([
+        launch(customer, keyA, tenantA.name), launch(customer, keyB, tenantB.name),
+      ]);
+      const [waitingId, foreignId] = await Promise.all([
+        startConversation(waiting, '本部门无人在线，等待人工领取'),
+        startConversation(foreign, '同一客户在乙租户由乙客服接手'),
+      ]);
+      expect(await detail(waiting, waitingId)).toMatchObject({ status: 200, data: { status: 'WAITING', assignee: null } });
+      expect(await detail(foreign, foreignId)).toMatchObject({ status: 200, data: { status: 'ACTIVE', assignee: '乙客服' } });
+      expect(await assigned(outside)).toEqual([foreignId]);
+      expect((await browserApi(outside, `${staff}/conversations/${waitingId}`)).status).toBe(404);
+      expect((await browserApi(billing, `${staff}/conversations?view=PENDING`)).data.items).toEqual([]);
+      expect((await browserApi(waiting, `${chats}/${foreignId}`)).status).toBe(404);
+
+      const returning = await staffPage(tenantA, agentTwo, password);
+      const queued = returning.getByRole('listitem').filter({ hasText: '本部门无人在线，等待人工领取' });
+      await expect(queued.getByRole('button', { name: '领取', exact: true })).toBeVisible();
+      await queued.getByRole('button', { name: '领取', exact: true }).click();
+      await expect(waiting.locator('.chat-assignee')).toHaveText('负责人 甲二号');
+      expect(await assigned(returning)).toContain(waitingId);
+    } finally {
+      await Promise.all(contexts.map((item) => item.close()));
+    }
+  });
+  test('an authenticated Nexus customer can safely take over a guest conversation', async ({ page, request, browser }) => {
+    test.setTimeout(55_000);
+    const adminContext = await browser.newContext({ baseURL: process.env.NEWCRISP_PUBLIC_ORIGIN });
+    const guestContext = await browser.newContext({ baseURL: process.env.NEWCRISP_PUBLIC_ORIGIN });
+    try {
+      const admin = await openStaff(adminContext, first, first.adminEmail, first.adminPassword);
+      const { status, data: site } = await write(admin, '/api/v1/staff/guest-sites', { title: '访客接续验收', origin: nexusOrigin });
+      expect(status).toBe(201);
+      const guest = await guestContext.newPage();
+      await guest.goto(`/embed/${site.id}`);
+      const issued = guest.waitForResponse((response) => response.url().includes('/api/v1/guest/') && response.ok());
+      await guest.getByRole('button', { name: '开始聊天' }).click();
+      const guestSession = await (await issued).json();
+      await expect(guest.locator('.chat-connection')).toHaveText('');
+      await guest.getByRole('textbox', { name: '消息' }).fill('这是登录前的访客历史');
+      await guest.getByRole('button', { name: '发送', exact: true }).click();
+      await expect(guest.locator('.chat-log')).toContainText('这是登录前的访客历史');
+      await guest.getByRole('button', { name: '显示访客接续码' }).click();
+      const code = await guest.getByLabel('访客接续码').inputValue();
+      const account = { email: 'linked-guest@example.test', password: 'Nexus-Guest!2026' };
+      expect((await request.post(`${nexusApi}/api/auth/register`, { data: { ...account, displayName: '访客接续验收' } })).ok()).toBe(true);
+      await page.goto(`${nexusOrigin}/login`);
+      await signInNexus(page, account);
+      await page.getByRole('button', { name: '在线客服' }).click();
+      await expect(page.getByRole('status')).toHaveText('已通过 Nexus 登录');
+      await page.getByText('接续访客对话', { exact: true }).click();
+      await page.getByLabel('访客接续码').fill(code);
+      await page.getByRole('button', { name: '接续访客会话' }).click();
+      await expect(page.getByText('访客会话已接续，可在会话列表查看。')).toBeVisible();
+      await expect(page.locator('.chat-log')).toContainText('这是登录前的访客历史');
+      await page.getByText('接续访客对话', { exact: true }).click();
+      await expect(page.getByLabel('访客接续码')).toHaveValue('');
+      expect((await request.get('/api/v1/customer/me', {
+        headers: { Authorization: `Bearer ${guestSession.token.accessToken}` },
+      })).status()).toBe(401);
+      expect((await write(page, '/api/v1/customer/guest-link', { code })).status).toBe(404);
+    } finally {
+      await Promise.all([adminContext.close(), guestContext.close()]);
+    }
+  });
 });
 
 async function openStaff(context, tenant, email, password) {
@@ -670,14 +856,19 @@ async function startConversation(page, text) {
 }
 
 async function staffReplies(page, conversationId, texts) {
-  const list = await browserApi(page, '/api/v1/staff/conversations?view=PENDING');
-  const item = list.data.items.find((row) => row.id === conversationId);
-  expect(item).toBeDefined();
   const path = `/api/v1/staff/conversations/${conversationId}`;
-  const claim = await write(page, `${path}/claim`, { actionId: randomUUID(), stateVersion: item.stateVersion });
-  expect(claim.status).toBe(200);
+  let current = await browserApi(page, path);
+  if (current.status === 404) {
+    const list = await browserApi(page, '/api/v1/staff/conversations?view=PENDING');
+    const item = list.data.items.find((row) => row.id === conversationId);
+    expect(item).toBeDefined();
+    current = await write(page, `${path}/claim`, { actionId: randomUUID(), stateVersion: item.stateVersion });
+  } else {
+    expect(current.data).toMatchObject({ status: 'ACTIVE', canReply: true });
+  }
+  expect(current.status).toBe(200);
   for (const text of texts) {
-    const reply = await write(page, `${path}/messages`, { text, clientMessageId: randomUUID(), stateVersion: claim.data.stateVersion });
+    const reply = await write(page, `${path}/messages`, { text, clientMessageId: randomUUID(), stateVersion: current.data.stateVersion });
     expect(reply.status).toBe(201);
   }
 }

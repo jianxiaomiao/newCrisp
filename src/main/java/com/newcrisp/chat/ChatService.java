@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
@@ -24,14 +25,27 @@ import org.springframework.transaction.annotation.Transactional;
 class ChatService {
     private final ChatStore store;
     private final Clock clock;
+    private final ChatPresence presence;
+    private final ServiceHours hours;
 
-    ChatService(ChatStore store, Clock clock) {
+    ChatService(ChatStore store, Clock clock, ChatPresence presence, ServiceHours hours) {
         this.store = store;
         this.clock = clock;
+        this.presence = presence;
+        this.hours = hours;
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
     Sent send(Actor actor, String id, Send input) {
+        return send(actor, id, input, null);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    Sent sendAttachment(Actor actor, String id, Send input, Upload upload) {
+        return send(actor, id, input, upload);
+    }
+
+    private Sent send(Actor actor, String id, Send input, Upload upload) {
         String key = uuid(input.clientMessageId());
         String text = input.text() == null ? "" : input.text().strip();
         if (text.isEmpty() || text.codePointCount(0, text.length()) > 4_000) throw invalid("INVALID_MESSAGE");
@@ -46,14 +60,17 @@ class ChatService {
         Conversation conversation = first ? null : require(actor, requested, true);
         if (conversation != null && !canRead(actor, conversation)) throw IdentityError.notFound();
         var prior = store.replay(actor, key);
-        if (prior.isPresent()) return replay(actor, prior.get(), requested, first, text, conversation);
+        if (prior.isPresent()) return replay(actor, prior.get(), requested, first, text, conversation, upload);
 
         if (first) {
             conversation = store.active(actor).orElse(null);
             if (conversation == null) {
+                store.lockRouting(actor.tenantId());
+                boolean olderWaiting = store.hasDispatchQueue(actor.tenantId(), actor.defaultDepartment());
                 var newId = UUID.randomUUID().toString();
                 store.create(actor, newId, now);
                 conversation = require(actor, newId, true);
+                if (!olderWaiting && hours.status(actor.tenantId(), clock.instant()).open()) assignToOnlineAgent(conversation, now);
             }
         }
         if (conversation.state() == State.CLOSED) throw conflict("CONVERSATION_CLOSED");
@@ -63,6 +80,7 @@ class ChatService {
         }
         try {
             var message = store.append(conversation, actor, key, text, first, now);
+            if (upload != null) message = store.attach(conversation, message, upload);
             store.enqueue(conversation, message.seq(), now);
             return new Sent(message.publicMessage(), false);
         } catch (DuplicateKeyException conflict) {
@@ -71,8 +89,43 @@ class ChatService {
         }
     }
 
-    private Sent replay(Actor actor, StoredMessage prior, String requested, boolean first, String text, Conversation locked) {
-        if (prior.firstSend() != first || (!first && !prior.conversationId().equals(requested)) || !prior.text().equals(text)) {
+    private boolean assignToOnlineAgent(Conversation conversation, LocalDateTime assignedAt) {
+        long tenant = conversation.tenantId();
+        String department = conversation.departmentId();
+        var sessions = presence.onlineAgentSessions(tenant, department);
+        if (sessions.isEmpty()) return false;
+        for (var candidate : store.onlineCandidates(conversation, sessions, LocalDateTime.now(clock))) {
+            if (!store.lockRoutingCandidate(tenant, candidate) || !presence.hasOnlineAgent(tenant, department, candidate)) continue;
+            store.change(conversation, State.ACTIVE, candidate.id(), assignedAt);
+            store.recordAutoAssignment(conversation, candidate.id(), assignedAt);
+            store.enqueueAssignment(conversation, assignedAt);
+            return true;
+        }
+        return false;
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    void fillQueue(long tenant) {
+        store.lockRouting(tenant);
+        var settings = hours.get(tenant);
+        if (!settings.fillQueue() || !ServiceHours.status(settings, clock.instant()).open()) return;
+        int remaining = 25;
+        for (String department : store.waitingDepartments(tenant)) {
+            if (remaining == 0) return;
+            if (presence.onlineAgentSessions(tenant, department).isEmpty()) continue;
+            while (remaining > 0) {
+                var next = store.nextWaiting(tenant, department);
+                if (next.isEmpty()) break;
+                var now = LocalDateTime.now(clock);
+                if (!assignToOnlineAgent(next.get(), now)) break;
+                remaining--;
+            }
+        }
+    }
+
+    private Sent replay(Actor actor, StoredMessage prior, String requested, boolean first, String text, Conversation locked, Upload upload) {
+        if (prior.firstSend() != first || (!first && !prior.conversationId().equals(requested)) || !prior.text().equals(text)
+                || !Arrays.equals(prior.attachmentSha(), upload == null ? null : upload.sha())) {
             throw conflict("MESSAGE_ID_CONFLICT");
         }
         Conversation original = locked == null ? require(actor, prior.conversationId(), false) : locked;
@@ -80,10 +133,14 @@ class ChatService {
         return new Sent(prior.publicMessage(), true);
     }
 
+    @Transactional(readOnly = true)
+    FileContent attachment(Actor actor, String id, String sequence) {
+        return store.attachment(view(actor, id), number(sequence)).orElseThrow(IdentityError::notFound);
+    }
+
     @Transactional(isolation = Isolation.READ_COMMITTED)
     ActionResult action(Actor actor, String id, Operation op, Action input) {
         if (actor.customer()) throw forbidden();
-        requireStaffAccess(actor);
         String key = uuid(input.actionId());
         long version = number(input.stateVersion());
         Long seen = op == Operation.CLOSE ? number(input.observedCustomerSeq()) : null;
@@ -94,6 +151,9 @@ class ChatService {
         }
         if ((op != Operation.CLOSE && input.observedCustomerSeq() != null)
                 || (op != Operation.TRANSFER && input.targetStaffId() != null)) throw invalid("INVALID_ACTION");
+        // Ownership changes share the same lock as automatic routing before taking a conversation lock.
+        store.lockRouting(actor.tenantId());
+        requireStaffAccess(actor);
         Conversation chat = require(actor, uuid(id), true);
         if (op == Operation.RETURN || op == Operation.TRANSFER) requireSupervisor(actor, chat);
         else if (!actor.agentDepartments().contains(chat.departmentId())) throw IdentityError.notFound();
@@ -136,7 +196,8 @@ class ChatService {
         try {
             store.recordAction(chat, actor, key, op, seen, reason, owner, time);
             store.change(chat, resultState(op), owner, time);
-            store.enqueue(chat, null, time);
+            if (op == Operation.CLAIM || op == Operation.TRANSFER) store.enqueueAssignment(chat, time);
+            else store.enqueue(chat, null, time);
             return result(chat, op, version);
         } catch (DuplicateKeyException conflict) {
             throw conflict("ACTION_ID_CONFLICT");

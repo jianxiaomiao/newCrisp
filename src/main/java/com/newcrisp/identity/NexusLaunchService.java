@@ -103,7 +103,7 @@ class NexusLaunchService {
     NexusStore.CustomerSession requireSession(String sid) {
         LocalDateTime checkedAt = now();
         var session = store.session(sid, checkedAt).orElseThrow(IdentityError::unauthorized);
-        if (checkedAt.isBefore(session.verifiedUntil())) return session;
+        if (session.guest() || checkedAt.isBefore(session.verifiedUntil())) return session;
         if (!verifier.active(session.userId(), session.sessionId())) {
             tokens.revoke(ChatIdentity.Side.CUSTOMER, sid);
             throw IdentityError.unauthorized();

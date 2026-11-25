@@ -11,6 +11,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,7 +24,9 @@ class ChatServiceTest {
     private static final String KEY = "8c9e4205-0a40-4ca3-9d3b-0979056af040";
     private static final String TARGET = "9c9e4205-0a40-4ca3-9d3b-0979056af040";
     private final ChatStore store = mock(ChatStore.class);
-    private final ChatService service = new ChatService(store, CLOCK);
+    private final ChatPresence presence = mock(ChatPresence.class);
+    private final ServiceHours hours = mock(ServiceHours.class);
+    private final ChatService service = new ChatService(store, CLOCK, presence, hours);
     private final Actor customer = new Actor(Side.CUSTOMER, 1, "customer", "support", Set.of(), Set.of(), 0);
     private final Actor owner = new Actor(Side.STAFF, 1, "agent", null, Set.of("support"), Set.of(), 0);
     private final Actor supervisor = new Actor(Side.STAFF, 1, "manager", null, Set.of(), Set.of("support"), 0);
@@ -73,6 +76,35 @@ class ChatServiceTest {
         assertThat(service.send(customer, null, new Send(KEY, "首条", null)).replayed()).isTrue();
         verify(store, never()).active(any());
         verify(store, never()).create(any(), any(), any());
+        verify(store, never()).lockRouting(anyLong());
+    }
+
+    @Test
+    void assignsToTheNextRankedAgentIfTheFirstGoesOffline() {
+        when(hours.status(1, CLOCK.instant())).thenReturn(new ServiceHours.Status(true, null, "UTC"));
+        var waiting = conversation(null, State.WAITING, 0, 0);
+        var offline = new RoutingCandidate("offline", 1);
+        var available = new RoutingCandidate("available", 2);
+        var sessions = Set.of("session-1", "session-2");
+        when(store.lockCustomer(customer)).thenReturn(true);
+        when(store.find(eq(1L), anyString(), eq(true))).thenReturn(Optional.of(waiting));
+        when(presence.onlineAgentSessions(1, "support")).thenReturn(sessions);
+        when(store.onlineCandidates(waiting, sessions, NOW)).thenReturn(List.of(offline, available));
+        when(store.lockRoutingCandidate(1, offline)).thenReturn(true);
+        when(store.lockRoutingCandidate(1, available)).thenReturn(true);
+        when(presence.hasOnlineAgent(1, "support", available)).thenReturn(true);
+        when(store.append(waiting, customer, KEY, "首条", true, NOW))
+                .thenReturn(new StoredMessage(ID, 1, true, "首条", NOW, KEY, true));
+
+        assertThat(service.send(customer, null, new Send(KEY, "首条", null)).message().conversationId()).isEqualTo(ID);
+        var steps = inOrder(store);
+        steps.verify(store).lockRouting(1);
+        steps.verify(store).onlineCandidates(waiting, sessions, NOW);
+        steps.verify(store).lockRoutingCandidate(1, offline);
+        steps.verify(store).lockRoutingCandidate(1, available);
+        steps.verify(store).change(waiting, State.ACTIVE, "available", NOW);
+        steps.verify(store).recordAutoAssignment(waiting, "available", NOW);
+        steps.verify(store).enqueue(waiting, 1L, NOW);
     }
 
     @Test
@@ -112,7 +144,7 @@ class ChatServiceTest {
         assertThat(service.action(supervisor, ID, Operation.TRANSFER, transfer)).isEqualTo(expected);
         verify(store).recordAction(chat, supervisor, KEY, Operation.TRANSFER, null, null, TARGET, NOW);
         verify(store).change(chat, State.ACTIVE, TARGET, NOW);
-        verify(store).enqueue(chat, null, NOW);
+        verify(store).enqueueAssignment(chat, NOW);
 
         when(store.find(1, ID, true)).thenReturn(Optional.of(conversation(TARGET, State.ACTIVE, 2, 2)));
         when(store.action(supervisor, KEY)).thenReturn(Optional.of(new ActionRecord(ID, Operation.TRANSFER, 1, null, null, TARGET)));

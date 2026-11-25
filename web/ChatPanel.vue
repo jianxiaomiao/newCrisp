@@ -1,24 +1,32 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
 import { responseError } from './api';
-import { SessionError, type BrowserSession, type SessionSide } from './web-session';
+import { SessionError, type SessionSide } from './web-session';
+import AttachmentMessage from './AttachmentMessage.vue';
+import { preferenceKey, staffNotification } from './staff-notifications';
 
 type Status = 'WAITING' | 'ACTIVE' | 'CLOSED';
 type View = 'CURRENT' | 'HISTORY' | 'PENDING' | 'MINE' | 'CLOSED' | 'DEPARTMENT';
 type Operation = 'claim' | 'return' | 'transfer' | 'close';
 type ConversationRef = { id: string; status: Status; stateVersion: string; lastCustomerSeq: string };
-type ListItem = ConversationRef & { preview: string | null; unread: number; timestamp: string };
+type ListItem = ConversationRef & { preview: string | null; unread: number; timestamp: string; queuedAt: string };
 type Detail = ConversationRef & {
   readSeq: string; canReply: boolean; canReturn: boolean; canTransfer: boolean; canClose: boolean;
-  assignee: string | null; customerOnline: boolean | null;
+  assignee: string | null; customerOnline: boolean | null; assigneeOnline: boolean | null; queuedAt: string;
 };
-type ChatMessage = { conversationId: string; seq: string; sender: 'CUSTOMER' | 'STAFF'; text: string };
+type ChatMessage = {
+  conversationId: string; seq: string; sender: 'CUSTOMER' | 'STAFF'; text: string;
+  attachment?: { name: string; type: string; size: number } | null;
+};
+type Reply = { id: string; title: string; body: string };
+type ServiceHours = { open: boolean; nextOpen: string | null; zone: string };
+type Agent = { id: string; name: string; email: string; department: string; online: boolean; accepting: boolean; active: number };
 type MessagePage = { items: ChatMessage[]; hasMore: boolean };
 type ConversationPage = { items: ListItem[]; nextCursor: string | null };
 type Counts = { pending: number; unread: number };
 type StaffOption = { id: string; displayName: string; email: string };
 type ServerHistory = {
-  action: 'CLAIM' | 'RETURN' | 'TRANSFER' | 'CLOSE'; operator: string; occurredAt: string; reason: string | null;
+  action: 'CLAIM' | 'RETURN' | 'TRANSFER' | 'CLOSE' | 'AUTO'; operator: string; occurredAt: string; reason: string | null;
   previousAssignee: StaffOption | null; newAssignee: StaffOption | null;
 };
 type TransferDraft = { row: ConversationRef; candidates?: StaffOption[] };
@@ -28,12 +36,13 @@ type SendAttempt = { id: string | null; text: string; clientMessageId: string };
 type Frame =
   | { type: 'ready' | 'ping'; data: string }
   | { type: 'sync.required' }
+  | { type: 'staff.notification'; data: { conversationId: string; eventId: string; assigned: boolean } }
   | { type: 'message.created'; data: ChatMessage }
   | { type: 'message.ack'; requestId: string; data: Ack }
   | { type: 'error'; requestId: string | null; data: { status: number; code: string } };
 
 const { side, identity, auth, sid, accessVersion, canQueue, canSupervise } = defineProps<{
-  side: SessionSide; identity: string; auth: BrowserSession; sid: string;
+  side: SessionSide; identity: string; auth: { request: (path: string, options?: RequestInit, expectedSid?: string) => Promise<Response> }; sid: string;
   accessVersion?: string; canQueue?: boolean; canSupervise?: boolean;
 }>();
 const emit = defineEmits<{ expired: [] }>();
@@ -43,7 +52,7 @@ if (canQueue) views.push(['PENDING', '待领取'], ['MINE', '我负责'], ['CLOS
 if (canSupervise) views.push(['DEPARTMENT', '部门会话']);
 
 const labels: Record<Status, string> = { WAITING: '等待客服', ACTIVE: '客服已接入', CLOSED: '已结束' };
-const historyLabels = { CLAIM: '领取', RETURN: '退回队列', TRANSFER: '转派', CLOSE: '结束' };
+const historyLabels = { CLAIM: '领取', RETURN: '退回队列', TRANSFER: '转派', CLOSE: '结束', AUTO: '自动分配' };
 const errorMessages = new Map([
   ['STATE_VERSION_CHANGED', '会话已变化，已刷新最新状态。'],
   ['ALREADY_CLAIMED', '已被其他客服领取。'],
@@ -53,6 +62,9 @@ const errorMessages = new Map([
   ['NOT_FOUND', '当前无法访问此会话。'],
   ['SESSION_REQUIRED', '登录已失效，请重新进入。'],
   ['SEND_RESULT_UNKNOWN', '发送结果待确认，重试会沿用本次发送。'],
+  ['INVALID_ATTACHMENT_SIZE', '文件须小于或等于 5 MB。'],
+  ['UNSUPPORTED_ATTACHMENT_TYPE', '请选择 PNG、JPEG 或 PDF 文件。'],
+  ['INVALID_ATTACHMENT_NAME', '文件名太长或含不支持的字符。'],
 ]);
 
 const view = ref<View>(views[0][0]);
@@ -70,6 +82,22 @@ const log = ref<HTMLOListElement>();
 const summary = ref('');
 const connection = ref('正在连接聊天…');
 const notice = ref('');
+const serviceHours = ref<ServiceHours>();
+const accepting = ref<boolean>();
+const updatingAvailability = ref(false);
+const team = ref<Agent[]>([]);
+const showTeam = ref(false);
+const replies = ref<Reply[]>([]);
+const showReplies = ref(false);
+const query = ref('');
+const matches = computed(() => {
+  const term = query.value.trim().toLowerCase();
+  return replies.value.filter((reply) => `${reply.title} ${reply.body}`.toLowerCase().includes(term));
+});
+const queuedClock = ref(Date.now());
+const notifications = ref(!customer && localStorage.getItem(preferenceKey(identity)) === 'on');
+const fileInput = ref<HTMLInputElement>();
+const attachment = shallowRef<{ file: File; key: string; conversation: string | null }>();
 const transfer = shallowRef<TransferDraft>();
 const transferTarget = ref('');
 const transferring = ref(false);
@@ -92,15 +120,110 @@ let reconnectDelay = 500;
 let dirty = false;
 let syncing = false;
 
-async function api<T = void>(path: string, options?: RequestInit): Promise<T> {
+async function request(path: string, options?: RequestInit): Promise<Response> {
   const headers: Record<string, string> = { 'X-NewCrisp-Actor': identity };
   if (accessVersion !== undefined) headers['X-NewCrisp-Staff-Access'] = accessVersion;
-  if (options?.body) headers['Content-Type'] = 'application/json';
+  if (typeof options?.body === 'string') headers['Content-Type'] = 'application/json';
   const response = await auth.request(`/api/v1/${side}${path}`, { signal: abort.signal, ...options, headers }, sid);
-  if (response.ok) return response.status === 204 ? undefined as T : response.json();
+  if (response.ok) return response;
   const error = await responseError(response);
   if (error.status === 401 || error.code === 'STAFF_ACCESS_CHANGED') invalidate();
   throw error;
+}
+
+async function api<T = void>(path: string, options?: RequestInit): Promise<T> {
+  const response = await request(path, options);
+  return response.status === 204 ? undefined as T : response.json();
+}
+
+async function readControls() {
+  try {
+    if (customer) serviceHours.value = await api<ServiceHours>('/service-hours');
+    if (canQueue && !updatingAvailability.value) accepting.value = (await api<{ accepting: boolean }>('/availability')).accepting;
+    if (canSupervise && showTeam.value) team.value = await api<Agent[]>('/availability/team');
+  } catch (error) { showError(error); }
+}
+
+async function toggleAvailability() {
+  if (accepting.value === undefined || updatingAvailability.value) return;
+  updatingAvailability.value = true;
+  try {
+    accepting.value = (await api<{ accepting: boolean }>('/availability', {
+      method: 'PUT', body: JSON.stringify({ accepting: !accepting.value }),
+    })).accepting;
+  } catch (error) { showError(error); }
+  finally { updatingAvailability.value = false; }
+}
+
+async function toggleReplies() {
+  showReplies.value = !showReplies.value;
+  if (!showReplies.value) return;
+  try { replies.value = await api<Reply[]>('/quick-replies'); }
+  catch (error) { showError(error); }
+}
+
+async function toggleNotifications() {
+  if (notifications.value) {
+    localStorage.removeItem(preferenceKey(identity));
+    notifications.value = false;
+    return;
+  }
+  if (!('Notification' in window) || await Notification.requestPermission() !== 'granted') {
+    notice.value = '请在浏览器中允许本站发送通知。';
+    return;
+  }
+  localStorage.setItem(preferenceKey(identity), 'on');
+  notifications.value = true;
+}
+
+async function openNotification(id: string) {
+  if (closed) return;
+  try {
+    const current = await api<Detail>(`/conversations/${id}`);
+    if (current.canReply && !closed) {
+      changeView('MINE');
+      openConversation(id);
+    }
+  } catch (error) { showError(error); }
+}
+
+function waitMinutes(timestamp: string) { return Math.max(0, Math.floor((queuedClock.value - Date.parse(timestamp)) / 60000)); }
+
+function pickFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file && file.size > 5 * 1024 * 1024) {
+    notice.value = '文件须小于或等于 5 MB。';
+    input.value = '';
+    attachment.value = undefined;
+    return;
+  }
+  attachment.value = file ? { file, key: crypto.randomUUID(), conversation: selection.value } : undefined;
+}
+
+async function uploadFile() {
+  const pending = attachment.value;
+  if (!pending || sending.value) return;
+  sending.value = true;
+  const form = new FormData();
+  form.set('file', pending.file);
+  form.set('clientMessageId', pending.key);
+  if (detail.value) form.set('stateVersion', detail.value.stateVersion);
+  try {
+    const base = pending.conversation ? `/conversations/${pending.conversation}` : '/conversations';
+    const result = await api<Ack>(`${base}/attachments`, { method: 'POST', body: form });
+    if (attachment.value === pending) {
+      if (!selection.value) select(result.message.conversationId, true);
+      attachment.value = undefined;
+      if (fileInput.value) fileInput.value.value = '';
+      notice.value = '';
+    }
+  } catch (error) { showError(error); }
+  finally { sending.value = false; void sync(); }
+}
+
+async function attachmentBlob(message: ChatMessage) {
+  return (await request(`/conversations/${message.conversationId}/attachments/${message.seq}`)).blob();
 }
 
 function showError(error: unknown) {
@@ -122,7 +245,13 @@ function select(id: string | null, preserveDraft = false) {
   if (history.value) history.value.open = false;
   historyRows.value = [];
   transfer.value = undefined;
-  if (!preserveDraft) { draft.value = ''; sendAttempt = null; }
+  if (!preserveDraft) {
+    draft.value = '';
+    sendAttempt = null;
+    attachment.value = undefined;
+    showReplies.value = false;
+    if (fileInput.value) fileInput.value.value = '';
+  }
 }
 
 function changeView(nextView: View, preserveDraft = false) {
@@ -175,6 +304,7 @@ async function syncMessages(id: string) {
 
 async function sync() {
   if (closed) return;
+  queuedClock.value = Date.now();
   dirty = true;
   if (syncing) return;
   syncing = true;
@@ -337,6 +467,8 @@ async function openSocket() {
     } else if (frame.type === 'ping') {
       source.send(JSON.stringify({ type: 'pong', nonce: frame.data }));
       if (!customer && selection.value) void sync();
+    } else if (frame.type === 'staff.notification') {
+      void staffNotification(identity, frame.data, (id) => void openNotification(id)).catch(() => {});
     } else if (frame.type === 'sync.required') {
       void sync();
     } else if (frame.type === 'message.created') {
@@ -433,9 +565,9 @@ async function loadHistory() {
 }
 
 function historyText(entry: ServerHistory) {
-  const change = entry.previousAssignee && entry.newAssignee
-    ? `${staffLabel(entry.previousAssignee)} → ${staffLabel(entry.newAssignee)}` : '';
-  return [historyLabels[entry.action], entry.operator, change, new Date(entry.occurredAt).toLocaleString(), entry.reason]
+  const change = entry.newAssignee ? staffLabel(entry.newAssignee) : '';
+  const assignment = entry.previousAssignee && change ? `${staffLabel(entry.previousAssignee)} → ${change}` : change;
+  return [historyLabels[entry.action], entry.operator, assignment, new Date(entry.occurredAt).toLocaleString(), entry.reason]
     .filter(Boolean).join(' · ');
 }
 
@@ -444,7 +576,12 @@ watch(() => detail.value?.stateVersion, () => {
   void loadHistory();
 });
 
-function onVisible() { if (!document.hidden) void sync(); }
+function onVisible() {
+  if (!document.hidden) {
+    void sync();
+    void readControls();
+  }
+}
 
 function invalidate() {
   if (closed) return;
@@ -468,6 +605,7 @@ onMounted(() => {
   interval = window.setInterval(onVisible, 30_000);
   void openSocket();
   void sync();
+  void readControls();
 });
 onUnmounted(dispose);
 </script>
@@ -482,6 +620,25 @@ onUnmounted(dispose);
     <p class="chat-summary">{{ summary }}</p>
     <p class="chat-connection" aria-live="polite">{{ connection }}</p>
     <p class="chat-notice" aria-live="polite">{{ notice }}</p>
+    <p v-if="customer && serviceHours && !serviceHours.open" class="chat-hours" aria-live="polite">
+      当前为非营业时间，可以继续留言。
+      <template v-if="serviceHours.nextOpen">
+        下次接待 {{ new Date(serviceHours.nextOpen).toLocaleString('zh-CN', { timeZone: serviceHours.zone }) }}（{{ serviceHours.zone }}）
+      </template>
+    </p>
+    <div v-if="!customer" class="chat-actions">
+      <button v-if="canQueue && accepting !== undefined" type="button" :disabled="updatingAvailability"
+        :aria-pressed="accepting" @click="toggleAvailability">{{ accepting ? '暂停接单' : '恢复接单' }}</button>
+      <span v-if="canQueue && accepting !== undefined">{{ accepting ? '接单中' : '已暂停接单' }}</span>
+      <button v-if="canQueue" type="button" @click="toggleNotifications">{{ notifications ? '关闭客服通知' : '开启客服通知' }}</button>
+      <button v-if="canSupervise" type="button" :aria-expanded="showTeam" @click="showTeam = !showTeam; readControls()">客服接单状态</button>
+    </div>
+    <ul v-if="showTeam" aria-label="部门客服接单状态">
+      <li v-for="agent in team" :key="`${agent.department}:${agent.id}`">
+        {{ agent.department }} · {{ agent.name }}（{{ agent.email }}）· {{ agent.online ? '在线' : '离线' }} ·
+        {{ agent.accepting ? '接单中' : '暂停接单' }} · 进行中 {{ agent.active }}
+      </li>
+    </ul>
     <div class="chat-layout">
       <div>
         <ul class="chat-list" aria-label="会话">
@@ -489,11 +646,17 @@ onUnmounted(dispose);
             <template v-if="!customer && view === 'PENDING'">
               <p>{{ row.preview || labels[row.status] }}</p>
               <time :datetime="row.timestamp">排队时间 {{ new Date(row.timestamp).toLocaleString() }}</time>
+              <p :class="{ 'queue-overdue': waitMinutes(row.timestamp) >= 10 }">
+                {{ waitMinutes(row.timestamp) >= 10 ? '等待已超时 · ' : '' }}已等待 {{ waitMinutes(row.timestamp) }} 分钟
+              </p>
               <button type="button" @click="perform('claim', row)">领取</button>
             </template>
             <button v-else type="button" :aria-pressed="selection === row.id" @click="openConversation(row.id)">
               {{ row.preview || labels[row.status] }}{{ row.unread ? `（${row.unread} 条未读）` : '' }}
             </button>
+            <p v-if="view === 'DEPARTMENT' && row.status === 'WAITING'" :class="{ 'queue-overdue': waitMinutes(row.queuedAt) >= 10 }">
+              {{ waitMinutes(row.queuedAt) >= 10 ? '等待已超时 · ' : '' }}已等待 {{ waitMinutes(row.queuedAt) }} 分钟
+            </p>
           </li>
         </ul>
         <button v-if="cursor" type="button" class="chat-next" @click="loadMoreConversations">更多会话</button>
@@ -502,6 +665,7 @@ onUnmounted(dispose);
         <h2 class="chat-title">{{ detail ? labels[detail.status] : customer ? '在线对话' : '对话' }}</h2>
         <p class="chat-meta">{{ meta }}</p>
         <p class="chat-assignee">{{ detail?.assignee ? `负责人 ${detail.assignee}` : '' }}</p>
+          <p v-if="detail?.assigneeOnline === false" class="queue-overdue">负责人已离线</p>
         <div class="chat-actions">
           <button v-if="detail?.canReturn" type="button" @click="perform('return', detail)">退回队列</button>
           <button v-if="detail?.canTransfer && !transfer" type="button" @click="openTransfer(detail)">转派会话</button>
@@ -526,12 +690,23 @@ onUnmounted(dispose);
         <ol ref="log" class="chat-log" aria-label="消息" tabindex="0" @scroll="markRead">
           <li v-for="message in visibleMessages" :key="message.seq" :data-seq="message.seq">
             <strong>{{ message.sender === 'CUSTOMER' ? '客户' : '客服' }}</strong>
-            <p>{{ message.text }}</p>
+            <AttachmentMessage v-if="message.attachment" :name="message.attachment.name" :type="message.attachment.type"
+              :get-file="() => attachmentBlob(message)" />
+            <p v-else>{{ message.text }}</p>
           </li>
         </ol>
         <form v-if="canReply" class="chat-form" @submit.prevent="submitMessage">
           <label>消息<textarea v-model="draft" name="text" maxlength="4000" required :disabled="sending"></textarea></label>
           <button type="submit" :disabled="sending">发送</button>
+          <button v-if="!customer" type="button" :aria-expanded="showReplies" @click="toggleReplies">快捷回复</button>
+          <div v-if="showReplies">
+            <label>搜索快捷回复<input v-model="query" type="search"></label>
+            <button v-for="reply in matches" :key="reply.id" type="button"
+              @click="draft = (draft ? draft + '\n' + reply.body : reply.body).slice(0, 4000); showReplies = false">{{ reply.title }}</button>
+            <p v-if="!matches.length">暂无匹配的快捷回复。</p>
+          </div>
+          <label>选择附件<input ref="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" :disabled="sending" @change="pickFile"></label>
+          <button v-if="attachment" type="button" :disabled="sending" @click="uploadFile">发送附件</button>
         </form>
         <details v-if="!customer && detail" ref="history" class="chat-history" @toggle="loadHistory">
           <summary>操作记录</summary>

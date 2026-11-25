@@ -83,16 +83,18 @@ class NexusStore {
     Optional<CustomerSession> session(String sid, LocalDateTime now) {
         return jdbc.sql("""
                 SELECT c.id, c.external_user_id, s.external_session_id, s.verified_until, t.code, t.name,
-                    c.tenant_id, i.department_id
+                    c.tenant_id, COALESCE(i.department_id, g.department_id) AS department_id, c.guest_site_id
                 FROM customer_session s JOIN customer c ON c.tenant_id = s.tenant_id AND c.id = s.customer_id
-                JOIN integration i ON i.tenant_id = c.tenant_id AND i.id = c.integration_id
+                LEFT JOIN integration i ON i.tenant_id = c.tenant_id AND i.id = c.integration_id
+                LEFT JOIN guest_site g ON g.tenant_id = c.tenant_id AND g.id = c.guest_site_id
                 JOIN tenant t ON t.id = c.tenant_id
-                WHERE s.sid = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND i.enabled AND t.status = 'ACTIVE'
+                WHERE s.sid = ? AND s.revoked_at IS NULL AND s.expires_at > ?
+                  AND (i.enabled OR g.enabled) AND t.status = 'ACTIVE'
                 """).params(sid, now).query((rs, row) -> new CustomerSession(
                 new CustomerProfile(rs.getString("id"), rs.getString("code"), rs.getString("name")),
                 rs.getLong("external_user_id"), rs.getLong("external_session_id"),
                 rs.getObject("verified_until", LocalDateTime.class), rs.getLong("tenant_id"),
-                rs.getString("department_id"))).optional();
+                rs.getString("department_id"), rs.getString("guest_site_id") != null)).optional();
     }
 
     void verified(String sid, LocalDateTime until) {
@@ -104,5 +106,10 @@ class NexusStore {
     record Grant(long tenantId, String integrationId, long userId, long sessionId, String origin) {}
     record CustomerProfile(String customerId, String tenantCode, String tenantName) {}
     record CustomerSession(CustomerProfile profile, long userId, long sessionId, LocalDateTime verifiedUntil,
-                           long tenantId, String departmentId) {}
+                           long tenantId, String departmentId, boolean guest) {
+        CustomerSession(CustomerProfile profile, long userId, long sessionId, LocalDateTime verifiedUntil,
+                        long tenantId, String departmentId) {
+            this(profile, userId, sessionId, verifiedUntil, tenantId, departmentId, false);
+        }
+    }
 }
