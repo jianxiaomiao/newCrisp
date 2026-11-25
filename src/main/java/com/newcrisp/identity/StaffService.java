@@ -28,15 +28,31 @@ class StaffService {
 
     @Transactional
     void provision(String code, String name, String email, String password) {
+        try {
+            store.createTenant(code, name.strip(), normalizeEmail(email), encodeNewPassword(password), LocalDateTime.now(clock));
+        } catch (DuplicateKeyException conflict) {
+            throw new IdentityError(HttpStatus.CONFLICT, "TENANT_ALREADY_EXISTS");
+        }
+    }
+
+    @Transactional
+    String createMember(String token, String departmentCode, String email, String password, String role, String displayName) {
+        var profile = profile(token);
+        if (!"TENANT_ADMIN".equals(profile.role())) throw new IdentityError(HttpStatus.FORBIDDEN, "TENANT_ADMIN_REQUIRED");
+        try {
+            String name = displayName == null || displayName.isBlank() ? "客服" : displayName.strip();
+            return store.createMember(profile.tenantId(), departmentCode, normalizeEmail(email), encodeNewPassword(password), role, name);
+        } catch (DuplicateKeyException conflict) {
+            throw new IdentityError(HttpStatus.CONFLICT, "STAFF_ALREADY_EXISTS");
+        }
+    }
+
+    private String encodeNewPassword(String password) {
         int length = password.getBytes(StandardCharsets.UTF_8).length;
         if (length < 12 || length > 72 || password.isBlank()) {
             throw new IdentityError(HttpStatus.BAD_REQUEST, "INVALID_ADMIN_PASSWORD");
         }
-        try {
-            store.createTenant(code, name.strip(), normalizeEmail(email), encoder.encode(password), LocalDateTime.now(clock));
-        } catch (DuplicateKeyException conflict) {
-            throw new IdentityError(HttpStatus.CONFLICT, "TENANT_ALREADY_EXISTS");
-        }
+        return encoder.encode(password);
     }
 
     String login(String code, String email, String password) {

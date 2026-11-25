@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/identity.css">
   <script type="module" src="/customer.js"></script>
 </head>
-<body>
+<body class="chat-page">
   <main>
     <h1>在线客服</h1>
     <p id="feedback" role="status" aria-live="polite">正在验证登录…</p>
@@ -15,6 +15,7 @@
       <p id="tenant"></p>
       <button id="logout" type="button">退出客服</button>
     </section>
+    <section id="chat" aria-label="在线对话" hidden></section>
   </main>
 </body>
 </html>

@@ -1,6 +1,6 @@
 # NewCrisp
 
-独立的多租户在线客服系统。当前阶段提供平台开通租户、首位租户管理员登录和 Nexus Web 用户的一次性跳转。客服会话和 WebSocket 聊天是下一阶段的功能。
+独立的多租户在线客服系统。客户从 Nexus Web 进入，客服在独立工作台领取会话并通过 WebSocket 回复。
 
 ## 本地工具
 
@@ -12,7 +12,7 @@
 mvn test
 ```
 
-JUnit 和 Mockito 验证租户开通、登录、凭证过期与重放处理、Origin 绑定、Nexus 会话撤销及数据库就绪检查。运行这组测试不需要启动数据库。
+JUnit 和 Mockito 验证身份接入、会话权限、幂等重放、旧负责人状态版本和结束前的已读约束。这组测试不需要启动数据库。
 
 ## 真实 MySQL 和浏览器验收
 
@@ -22,9 +22,9 @@ npx playwright install chromium --only-shell
 npm run test:e2e
 ```
 
-脚本打包后端，创建临时 MySQL 8.4 容器和 `newcrisp_e2e` 测试库，分配回环数据库端口并生成一次性凭据。Playwright 验证 Flyway V1/V2、平台开通、管理员登录及跨租户隔离。脚本退出时清理本轮容器及其匿名数据卷。
+脚本打包后端，创建临时 MySQL 8.4 容器和 `newcrisp_e2e` 测试库，分配回环数据库端口并生成一次性凭据。Playwright 验证 Flyway V1–V3、平台开通、管理员登录及跨租户隔离。脚本退出时清理本轮容器及其匿名数据卷。
 
-要覆盖真实 Nexus 浏览器登录、一次性跳转、客户隔离和登出撤销，运行完整验收：
+下列命令还会验收真实 Nexus 登录、WebSocket 消息确认丢失重试、并发领取、断线补读、退回及结束。
 
 ```sh
 NEWCRISP_E2E_NEXUS_ROOT=/Users/xiaomiao/Nexus npm run test:e2e
@@ -50,3 +50,9 @@ export NEWCRISP_MAVEN='/Applications/IntelliJ IDEA.app/Contents/plugins/maven/li
 4. 另生成一个独立的 32 字节 Base64url 复核凭据。NewCrisp 使用 `NEWCRISP_NEXUS_VERIFY_KEY` 保存原凭据，`NEWCRISP_NEXUS_VERIFY_URL` 指向 Nexus 的 `/api/internal/support/chat/session-status`。Nexus 使用 `NEXUS_CHAT_VERIFY_KEY_SHA256` 保存该凭据的 SHA-256 十六进制摘要。当前实例接入一个 Nexus 身份源，客户会话的 Nexus 校验结果最多缓存 60 秒。
 
 平台 API 使用运维凭据，管理员和客户使用各自的 Host Cookie。正式环境的公开来源使用 HTTPS。一次性跳转凭证有效 60 秒，浏览器以表单正文提交，兑换前复核 Nexus 会话，消费及创建客户会话原子提交。
+
+## 会话与工作台
+
+租户管理员从 `/staff.html` 的「添加客服成员」为本租户现有部门创建客服或主管。普通客服可以领取本部门待领取会话，主管可以在「部门会话」退回会话。客户从 Nexus 的「在线客服」直接发第一条消息。在「已结束」及「历史会话」可查看各自有权限的历史。
+
+WebSocket 入口为 `/ws/customer` 和 `/ws/staff`。浏览器通过 `conversation.start` 和 `message.send` 发送，服务端提交后返回 `message.ack`，使用 `clientMessageId` 去重。页面从 HTTP 查询队列、历史、已读及发送结果，按消息序号补齐缺失消息。位于反向代理后时，代理须启用 WebSocket 升级，并允许超过心跳间隔的连接空闲时间。默认 15 秒探测一次，45 秒未确认后离线。

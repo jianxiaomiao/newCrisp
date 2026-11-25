@@ -1,9 +1,19 @@
+import { mountChat } from './chat.js';
+
 const feedback = document.querySelector('#feedback');
 const profile = document.querySelector('#profile');
 const logout = document.querySelector('#logout');
 const endpoint = '/api/v1/customer';
 let csrf;
 let profileRevision = 0;
+let chatIdentity;
+let stopChat;
+
+function clearChat() {
+  stopChat?.();
+  stopChat = undefined;
+  chatIdentity = undefined;
+}
 
 async function refreshProfile() {
   const revision = ++profileRevision;
@@ -12,6 +22,7 @@ async function refreshProfile() {
     if (revision !== profileRevision) return;
     if (response.status === 401) {
       csrf = undefined;
+      clearChat();
       profile.hidden = true;
       feedback.textContent = '请从 Nexus 控制台重新进入在线客服。';
       return;
@@ -23,6 +34,13 @@ async function refreshProfile() {
     document.querySelector('#tenant').textContent = user.tenantName;
     profile.hidden = false;
     feedback.textContent = '已通过 Nexus 登录';
+    if (chatIdentity !== user.customerId) {
+      clearChat();
+      chatIdentity = user.customerId;
+      stopChat = mountChat(document.querySelector('#chat'), {
+        side: 'customer', identity: chatIdentity, csrf: () => csrf, expired: () => { clearChat(); refreshProfile(); },
+      });
+    }
   } catch {
     if (revision !== profileRevision) return;
     profile.hidden = true;
@@ -36,6 +54,7 @@ logout.addEventListener('click', async () => {
   try {
     const response = await fetch(`${endpoint}/session`, { method: 'DELETE', headers: { 'X-NewCrisp-CSRF': csrf } });
     if (!response.ok) throw new Error('logout unavailable');
+    clearChat();
     await refreshProfile();
   } catch {
     feedback.textContent = '退出未确认，请重试。';

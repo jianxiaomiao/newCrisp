@@ -79,18 +79,22 @@ class NexusLaunchService {
     }
 
     NexusStore.CustomerProfile profile(String token) {
+        return requireSession(token).profile();
+    }
+
+    NexusStore.CustomerSession requireSession(String token) {
         if (!IdentityTokens.valid(token)) throw IdentityError.unauthorized();
         byte[] hash = IdentityTokens.digest(token);
         LocalDateTime checkedAt = now();
         var session = store.session(hash, checkedAt).orElseThrow(IdentityError::unauthorized);
-        if (checkedAt.isBefore(session.verifiedUntil())) return session.profile();
+        if (checkedAt.isBefore(session.verifiedUntil())) return session;
         if (!verifier.active(session.userId(), session.sessionId())) {
             store.deleteSession(hash);
             throw IdentityError.unauthorized();
         }
         store.verified(hash, checkedAt.plus(settings.nexusVerificationTtl()));
         // A local logout or integration disable during the upstream request invalidates the result.
-        return store.session(hash, now()).orElseThrow(IdentityError::unauthorized).profile();
+        return store.session(hash, now()).orElseThrow(IdentityError::unauthorized);
     }
 
     void logout(String token) {

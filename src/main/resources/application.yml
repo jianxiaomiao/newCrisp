@@ -6,6 +6,10 @@ spring:
   jackson:
     deserialization:
       fail-on-unknown-properties: true
+  task:
+    scheduling:
+      pool:
+        size: 2
   sql:
     init:
       mode: never

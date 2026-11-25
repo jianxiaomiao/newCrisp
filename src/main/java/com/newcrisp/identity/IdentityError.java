@@ -10,21 +10,21 @@ import org.springframework.web.bind.MissingRequestValueException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-final class IdentityError extends RuntimeException {
-    final HttpStatus status;
-    final String code;
+public final class IdentityError extends RuntimeException {
+    public final HttpStatus status;
+    public final String code;
 
-    IdentityError(HttpStatus status, String code) {
+    public IdentityError(HttpStatus status, String code) {
         super(code);
         this.status = status;
         this.code = code;
     }
 
-    static IdentityError unauthorized() { return new IdentityError(HttpStatus.UNAUTHORIZED, "SESSION_REQUIRED"); }
+    public static IdentityError unauthorized() { return new IdentityError(HttpStatus.UNAUTHORIZED, "SESSION_REQUIRED"); }
     static IdentityError origin() { return new IdentityError(HttpStatus.FORBIDDEN, "ORIGIN_REJECTED"); }
     static IdentityError invalidGrant() { return new IdentityError(HttpStatus.UNAUTHORIZED, "INVALID_LAUNCH_GRANT"); }
     static IdentityError unavailable() { return new IdentityError(HttpStatus.SERVICE_UNAVAILABLE, "NEXUS_UNAVAILABLE"); }
-    static IdentityError notFound() { return new IdentityError(HttpStatus.NOT_FOUND, "NOT_FOUND"); }
+    public static IdentityError notFound() { return new IdentityError(HttpStatus.NOT_FOUND, "NOT_FOUND"); }
 }
 
 @RestControllerAdvice

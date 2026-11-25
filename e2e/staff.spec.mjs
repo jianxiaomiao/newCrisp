@@ -14,8 +14,8 @@ test('platform provisions an isolated tenant and its first administrator logs in
 
   await page.goto('/staff.html');
   await page.getByLabel('租户代码').fill(second.code);
-  await page.getByLabel('邮箱').fill(first.adminEmail);
-  await page.getByLabel('密码').fill(first.adminPassword);
+  await page.getByLabel('邮箱', { exact: true }).fill(first.adminEmail);
+  await page.getByLabel('密码', { exact: true }).fill(first.adminPassword);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.getByRole('status')).toHaveText('租户代码、邮箱或密码有误。');
 
@@ -27,6 +27,10 @@ test('platform provisions an isolated tenant and its first administrator logs in
   expect((await browserApi(page, '/api/v1/staff/tenants/staff-b')).status).toBe(404);
   expect((await browserApi(page, '/api/v1/customer/me')).status).toBe(401);
   expect((await browserApi(page, '/api/v1/staff/session', { method: 'DELETE' })).status).toBe(403);
+  await page.getByLabel('成员邮箱').fill('staff-agent@example.test');
+  await page.getByLabel('初始密码').fill('Temporary-Password!2026');
+  await page.getByRole('button', { name: '创建成员' }).click();
+  await expect(page.getByRole('status')).toHaveText('成员已创建。');
   expect((await browserApi(page, '/api/v1/platform/tenants', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(first),
   })).status).toBe(401);

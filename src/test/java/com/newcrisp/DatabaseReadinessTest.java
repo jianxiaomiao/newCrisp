@@ -14,7 +14,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest(properties = "spring.flyway.enabled=false")
+@SpringBootTest(properties = {"spring.flyway.enabled=false", "newcrisp.chat.dispatch-ms=60000",
+        "newcrisp.chat.outbox-start-delay-ms=60000"})
 @AutoConfigureMockMvc
 class DatabaseReadinessTest {
     @Autowired

@@ -80,7 +80,8 @@ class NexusStore {
 
     Optional<CustomerSession> session(byte[] hash, LocalDateTime now) {
         return jdbc.sql("""
-                SELECT c.id, c.external_user_id, s.external_session_id, s.verified_until, t.code, t.name
+                SELECT c.id, c.external_user_id, s.external_session_id, s.verified_until, t.code, t.name,
+                    c.tenant_id, i.department_id
                 FROM customer_session s JOIN customer c ON c.tenant_id = s.tenant_id AND c.id = s.customer_id
                 JOIN integration i ON i.tenant_id = c.tenant_id AND i.id = c.integration_id
                 JOIN tenant t ON t.id = c.tenant_id
@@ -88,7 +89,8 @@ class NexusStore {
                 """).params(hash, now).query((rs, row) -> new CustomerSession(
                 new CustomerProfile(rs.getString("id"), rs.getString("code"), rs.getString("name")),
                 rs.getLong("external_user_id"), rs.getLong("external_session_id"),
-                rs.getObject("verified_until", LocalDateTime.class))).optional();
+                rs.getObject("verified_until", LocalDateTime.class), rs.getLong("tenant_id"),
+                rs.getString("department_id"))).optional();
     }
 
     void verified(byte[] hash, LocalDateTime until) {
@@ -103,5 +105,6 @@ class NexusStore {
     record IntegrationKey(long tenantId, String integrationId, byte[] secretHash) {}
     record Grant(long tenantId, String integrationId, long userId, long sessionId, String origin) {}
     record CustomerProfile(String customerId, String tenantCode, String tenantName) {}
-    record CustomerSession(CustomerProfile profile, long userId, long sessionId, LocalDateTime verifiedUntil) {}
+    record CustomerSession(CustomerProfile profile, long userId, long sessionId, LocalDateTime verifiedUntil,
+                           long tenantId, String departmentId) {}
 }

@@ -14,7 +14,8 @@ export default defineConfig({
   webServer: {
     command: 'java -jar target/newcrisp-server.jar',
     url: `${baseURL}/actuator/health/readiness`,
-    env: { SERVER_ADDRESS: '127.0.0.1', SERVER_PORT: port },
+    env: { SERVER_ADDRESS: '127.0.0.1', SERVER_PORT: port,
+      NEWCRISP_CHAT_HEARTBEAT_MS: '700', NEWCRISP_CHAT_PRESENCE_TTL: '3s' },
     reuseExistingServer: false,
     gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
     timeout: 60_000,

@@ -101,7 +101,7 @@ class NexusLaunchServiceTest {
     @Test
     void expiredVerificationRevokesCustomerSessionIfNexusNoLongerRecognizesIt() {
         var profile = new NexusStore.CustomerProfile("customer-a", "tenant-a", "第一租户");
-        when(store.session(aryEq(hash), eq(NOW))).thenReturn(Optional.of(new NexusStore.CustomerSession(profile, 7, 11, NOW)));
+        when(store.session(aryEq(hash), eq(NOW))).thenReturn(Optional.of(new NexusStore.CustomerSession(profile, 7, 11, NOW, 17, "support")));
         when(verifier.active(7, 11)).thenReturn(false);
 
         assertThatThrownBy(() -> service.profile(token)).hasMessage("SESSION_REQUIRED");

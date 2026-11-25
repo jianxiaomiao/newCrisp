@@ -5,6 +5,7 @@ import java.time.Duration;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -16,10 +17,12 @@ import org.springframework.web.bind.annotation.*;
 class CustomerController {
     private final NexusLaunchService nexus;
     private final IdentityConfiguration.Settings settings;
+    private final ApplicationEventPublisher events;
 
-    CustomerController(NexusLaunchService nexus, IdentityConfiguration.Settings settings) {
+    CustomerController(NexusLaunchService nexus, IdentityConfiguration.Settings settings, ApplicationEventPublisher events) {
         this.nexus = nexus;
         this.settings = settings;
+        this.events = events;
     }
 
     @PostMapping(value = "/integrations/nexus/launch-grants", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -63,6 +66,7 @@ class CustomerController {
         String token = IdentityHttp.token(request, IdentityHttp.CUSTOMER);
         IdentityHttp.requireCsrf(request, token);
         nexus.logout(token);
+        events.publishEvent(new ChatIdentity.SessionEnded(new ChatIdentity.Credential(ChatIdentity.Side.CUSTOMER, token)));
         return ResponseEntity.noContent().cacheControl(CacheControl.noStore())
                 .header(HttpHeaders.SET_COOKIE, IdentityHttp.cookie(IdentityHttp.CUSTOMER, "", Duration.ZERO)).build();
     }

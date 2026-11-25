@@ -7,6 +7,7 @@ import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -19,10 +20,12 @@ class StaffController {
     static final String TENANT_CODE = "[a-z][a-z0-9-]{2,47}";
     private final StaffService staff;
     private final IdentityConfiguration.Settings settings;
+    private final ApplicationEventPublisher events;
 
-    StaffController(StaffService staff, IdentityConfiguration.Settings settings) {
+    StaffController(StaffService staff, IdentityConfiguration.Settings settings, ApplicationEventPublisher events) {
         this.staff = staff;
         this.settings = settings;
+        this.events = events;
     }
 
     @PostMapping(value = "/session", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -55,11 +58,25 @@ class StaffController {
         String token = IdentityHttp.token(request, IdentityHttp.STAFF);
         IdentityHttp.requireCsrf(request, token);
         staff.logout(token);
+        events.publishEvent(new ChatIdentity.SessionEnded(new ChatIdentity.Credential(ChatIdentity.Side.STAFF, token)));
         return ResponseEntity.noContent().cacheControl(CacheControl.noStore())
                 .header(HttpHeaders.SET_COOKIE, IdentityHttp.cookie(IdentityHttp.STAFF, "", Duration.ZERO)).build();
+    }
+
+    @PostMapping(value = "/members", consumes = MediaType.APPLICATION_JSON_VALUE)
+    ResponseEntity<MemberCreated> createMember(@Valid @RequestBody Member input, HttpServletRequest request) {
+        IdentityHttp.requireOrigin(request, settings.publicOrigin());
+        String token = IdentityHttp.token(request, IdentityHttp.STAFF);
+        IdentityHttp.requireCsrf(request, token);
+        String id = staff.createMember(token, input.departmentCode(), input.email(), input.password(), input.role(), input.displayName());
+        return ResponseEntity.status(201).cacheControl(CacheControl.noStore()).body(new MemberCreated(id));
     }
 
     record Login(@NotBlank @Pattern(regexp = TENANT_CODE) String tenantCode,
                  @NotBlank @Email @Size(max = 254) String email, @NotBlank @Size(max = 72) String password) {}
     record TenantView(String code, String name) {}
+    record Member(@NotBlank @Pattern(regexp = TENANT_CODE) String departmentCode,
+                  @NotBlank @Email @Size(max = 254) String email, @NotBlank @Size(max = 72) String password,
+                  @NotBlank @Pattern(regexp = "AGENT|SUPERVISOR") String role, @Size(max = 64) String displayName) {}
+    record MemberCreated(String staffId) {}
 }

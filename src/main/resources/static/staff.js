@@ -1,3 +1,5 @@
+import { mountChat } from './chat.js';
+
 const login = document.querySelector('#login');
 const profile = document.querySelector('#profile');
 const heading = document.querySelector('#heading');
@@ -6,11 +8,18 @@ const logout = document.querySelector('#logout');
 const submit = login.querySelector('button');
 const endpoint = '/api/v1/staff';
 let csrf;
+const member = document.querySelector('#member');
+let chatIdentity;
+let stopChat;
 
 async function refreshProfile() {
   const response = await fetch(`${endpoint}/me`, { cache: 'no-store' });
   if (response.status === 401) {
     csrf = undefined;
+    stopChat?.();
+    stopChat = undefined;
+    chatIdentity = undefined;
+    member.hidden = true;
     heading.textContent = '租户管理员登录';
     login.hidden = false;
     profile.hidden = true;
@@ -21,9 +30,18 @@ async function refreshProfile() {
   csrf = response.headers.get('X-NewCrisp-CSRF');
   document.querySelector('#workspace').textContent = user.tenantName;
   document.querySelector('#email').textContent = user.email;
-  heading.textContent = '租户管理';
+  heading.textContent = user.role === 'TENANT_ADMIN' ? '租户管理' : '客服工作台';
   login.hidden = true;
   profile.hidden = false;
+  member.hidden = user.role !== 'TENANT_ADMIN';
+  if (chatIdentity !== user.staffId) {
+    stopChat?.();
+    chatIdentity = user.staffId;
+    stopChat = mountChat(document.querySelector('#chat'), {
+      side: 'staff', identity: user.staffId, csrf: () => csrf, canQueue: user.canQueue, canSupervise: user.canSupervise,
+      expired: () => { chatIdentity = undefined; refreshProfile().catch(() => { feedback.textContent = '请重新登录。'; }); },
+    });
+  }
 }
 
 login.addEventListener('submit', async (event) => {
@@ -65,3 +83,19 @@ logout.addEventListener('click', async () => {
 });
 
 refreshProfile().catch(() => { feedback.textContent = '暂时无法加载登录状态，请刷新页面。'; });
+
+member.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const submitMember = member.querySelector('button');
+  submitMember.disabled = true;
+  try {
+    const response = await fetch(`${endpoint}/members`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-NewCrisp-CSRF': csrf },
+      body: JSON.stringify(Object.fromEntries(new FormData(member))),
+    });
+    if (!response.ok) throw new Error('member unavailable');
+    member.reset();
+    feedback.textContent = '成员已创建。';
+  } catch { feedback.textContent = '无法创建成员，请核对邮箱、部门和密码。'; }
+  finally { submitMember.disabled = false; }
+});

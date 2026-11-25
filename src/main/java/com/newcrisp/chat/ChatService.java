@@ -1,0 +1,238 @@
+package com.newcrisp.chat;
+
+import static com.newcrisp.chat.ChatModels.*;
+
+import com.newcrisp.identity.ChatIdentity.Actor;
+import com.newcrisp.identity.IdentityError;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+class ChatService {
+    private final ChatStore store;
+    private final Clock clock;
+
+    ChatService(ChatStore store, Clock clock) {
+        this.store = store;
+        this.clock = clock;
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    Sent send(Actor actor, String id, Send input) {
+        String key = uuid(input.clientMessageId());
+        String text = input.text() == null ? "" : input.text().strip();
+        if (text.isEmpty() || text.codePointCount(0, text.length()) > 4_000) throw invalid("INVALID_MESSAGE");
+        boolean first = id == null;
+        if (first && !actor.customer()) throw forbidden();
+        if (!actor.customer() && input.stateVersion() == null) throw invalid("INVALID_SEQUENCE_OR_VERSION");
+        String requested = first ? null : uuid(id);
+        LocalDateTime now = LocalDateTime.now(clock);
+        if (actor.customer() && !store.lockCustomer(actor)) throw IdentityError.unauthorized();
+
+        Conversation conversation = first ? null : require(actor, requested, true);
+        if (conversation != null && !canRead(actor, conversation)) throw IdentityError.notFound();
+        var prior = store.replay(actor, key);
+        if (prior.isPresent()) return replay(actor, prior.get(), requested, first, text, conversation);
+
+        if (first) {
+            conversation = store.active(actor).orElse(null);
+            if (conversation == null) {
+                var newId = UUID.randomUUID().toString();
+                store.create(actor, newId, now);
+                conversation = require(actor, newId, true);
+            }
+        }
+        if (conversation.state() == State.CLOSED) throw conflict("CONVERSATION_CLOSED");
+        if (!actor.customer()) {
+            if (!owns(actor, conversation)) throw forbidden();
+            checkVersion(conversation, number(input.stateVersion()));
+        }
+        try {
+            var message = store.append(conversation, actor, key, text, first, now);
+            store.enqueue(conversation, message.seq(), now);
+            return new Sent(message.publicMessage(), false);
+        } catch (DuplicateKeyException conflict) {
+            // Same-room writes are serialized. A duplicate here is a conflicting use in another conversation.
+            throw conflict("MESSAGE_ID_CONFLICT");
+        }
+    }
+
+    private Sent replay(Actor actor, StoredMessage prior, String requested, boolean first, String text, Conversation locked) {
+        if (prior.firstSend() != first || (!first && !prior.conversationId().equals(requested)) || !prior.text().equals(text)) {
+            throw conflict("MESSAGE_ID_CONFLICT");
+        }
+        Conversation original = locked == null ? require(actor, prior.conversationId(), false) : locked;
+        if (!canRead(actor, original)) throw IdentityError.notFound();
+        return new Sent(prior.publicMessage(), true);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    ActionResult action(Actor actor, String id, Operation op, Action input) {
+        if (actor.customer()) throw forbidden();
+        String key = uuid(input.actionId());
+        long version = number(input.stateVersion());
+        Long seen = op == Operation.CLOSE ? number(input.observedCustomerSeq()) : null;
+        String reason = input.reason() == null || input.reason().isBlank() ? null : input.reason().strip();
+        if (reason != null && (op != Operation.RETURN || reason.codePointCount(0, reason.length()) > 400)) {
+            throw invalid("INVALID_ACTION_REASON");
+        }
+        if (op != Operation.CLOSE && input.observedCustomerSeq() != null) throw invalid("INVALID_ACTION");
+        Conversation chat = require(actor, uuid(id), true);
+        Set<String> departments = op == Operation.RETURN ? actor.supervisorDepartments() : actor.agentDepartments();
+        if (!departments.contains(chat.departmentId())) throw IdentityError.notFound();
+        var prior = store.action(actor, key);
+        if (prior.isPresent()) {
+            var action = prior.get();
+            if (!action.conversationId().equals(chat.id()) || action.operation() != op || action.version() != version
+                    || !Objects.equals(action.observedCustomerSeq(), seen) || !Objects.equals(action.reason(), reason)) {
+                throw conflict("ACTION_ID_CONFLICT");
+            }
+            return result(chat, op, version);
+        }
+
+        checkVersion(chat, version);
+        String owner = switch (op) {
+            case CLAIM -> {
+                if (chat.state() != State.WAITING) throw conflict("ALREADY_CLAIMED");
+                yield actor.id();
+            }
+            case RETURN -> {
+                if (chat.state() != State.ACTIVE) throw conflict("INVALID_CONVERSATION_STATE");
+                yield null;
+            }
+            case CLOSE -> {
+                if (chat.state() != State.ACTIVE || !owns(actor, chat)) throw IdentityError.notFound();
+                if (seen != chat.lastCustomerSeq() || chat.staffReadSeq() < chat.lastCustomerSeq()) {
+                    throw conflict("NEW_CUSTOMER_MESSAGES");
+                }
+                yield actor.id();
+            }
+        };
+        var time = LocalDateTime.now(clock);
+        try {
+            store.recordAction(chat, actor, key, op, seen, reason, owner, time);
+            store.change(chat, resultState(op), owner, time);
+            store.enqueue(chat, null, time);
+            return result(chat, op, version);
+        } catch (DuplicateKeyException conflict) {
+            throw conflict("ACTION_ID_CONFLICT");
+        }
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    void read(Actor actor, String id, Read input) {
+        var chat = require(actor, uuid(id), true);
+        if (!canRead(actor, chat)) throw IdentityError.notFound();
+        if (!actor.customer()) {
+            if (!owns(actor, chat) || chat.state() != State.ACTIVE) throw forbidden();
+            checkVersion(chat, number(input.stateVersion()));
+        }
+        long seq = number(input.upToSeq());
+        if (seq > chat.lastSeq()) throw invalid("INVALID_READ_POSITION");
+        if (store.advanceRead(chat, actor, seq)) store.enqueue(chat, null, LocalDateTime.now(clock));
+    }
+
+    ConversationPage list(Actor actor, View view, String cursor, int limit) {
+        boolean customerView = view == View.CURRENT || view == View.HISTORY;
+        if (customerView != actor.customer()) throw forbidden();
+        Set<String> departments = view == View.DEPARTMENT ? actor.supervisorDepartments() : actor.agentDepartments();
+        if (!customerView && departments.isEmpty()) return new ConversationPage(java.util.List.of(), null);
+        var rows = store.list(actor, view, departments, decode(cursor, view), pageSize(limit) + 1);
+        boolean more = rows.size() > limit;
+        var items = more ? rows.subList(0, limit) : rows;
+        String next = more ? encode(items.getLast(), view) : null;
+        return new ConversationPage(java.util.List.copyOf(items), next);
+    }
+
+    Summary summary(Actor actor) { return store.summary(actor); }
+
+    @Transactional(readOnly = true)
+    MessagePage messages(Actor actor, String id, String after, String before, int limit) {
+        var chat = require(actor, uuid(id), false);
+        if (!canRead(actor, chat)) throw IdentityError.notFound();
+        if (after != null && before != null) throw invalid("AMBIGUOUS_MESSAGE_CURSOR");
+        var rows = store.messages(chat, after == null ? null : number(after), before == null ? null : number(before),
+                pageSize(limit) + 1);
+        boolean more = rows.size() > limit;
+        var result = new ArrayList<>(rows.subList(0, Math.min(limit, rows.size())));
+        if (after == null) Collections.reverse(result);
+        return new MessagePage(result.stream().map(StoredMessage::publicMessage).toList(), more);
+    }
+
+    Conversation view(Actor actor, String id) {
+        var chat = require(actor, uuid(id), false);
+        if (!canRead(actor, chat)) throw IdentityError.notFound();
+        return chat;
+    }
+
+    String assigneeName(Conversation conversation) { return store.assigneeName(conversation); }
+
+    @Transactional(readOnly = true)
+    java.util.List<ActionHistory> history(Actor actor, String id) {
+        if (actor.customer()) throw IdentityError.notFound();
+        return store.history(view(actor, id));
+    }
+
+    static boolean canRead(Actor actor, Conversation chat) {
+        if (actor.tenantId() != chat.tenantId()) return false;
+        return actor.customer() ? actor.id().equals(chat.customerId())
+                : owns(actor, chat) || actor.supervisorDepartments().contains(chat.departmentId());
+    }
+
+    static boolean owns(Actor staff, Conversation chat) {
+        return !staff.customer() && staff.id().equals(chat.assigneeId()) && staff.agentDepartments().contains(chat.departmentId());
+    }
+
+    private Conversation require(Actor actor, String id, boolean lock) {
+        return store.find(actor.tenantId(), id, lock).orElseThrow(IdentityError::notFound);
+    }
+
+    private static void checkVersion(Conversation chat, long expected) {
+        if (chat.version() != expected) throw conflict("STATE_VERSION_CHANGED");
+    }
+
+    private static State resultState(Operation op) {
+        return switch (op) {
+            case CLAIM -> State.ACTIVE;
+            case RETURN -> State.WAITING;
+            case CLOSE -> State.CLOSED;
+        };
+    }
+
+    private static ActionResult result(Conversation chat, Operation op, long version) {
+        return new ActionResult(chat.id(), resultState(op), Long.toString(version + 1));
+    }
+
+    private static int pageSize(int value) {
+        if (value < 1 || value > 100) throw invalid("INVALID_PAGE_SIZE");
+        return value;
+    }
+
+    private static String encode(ListItem item, View view) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+                (view + "|" + item.timestamp() + "|" + item.id()).getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private static Cursor decode(String value, View view) {
+        if (value == null) return null;
+        try {
+            if (value.length() > 200) throw invalid("INVALID_CURSOR");
+            var parts = new String(Base64.getUrlDecoder().decode(value), StandardCharsets.US_ASCII).split("\\|", -1);
+            if (parts.length != 3 || !view.name().equals(parts[0]) || !parts[1].endsWith("Z")) throw invalid("INVALID_CURSOR");
+            return new Cursor(LocalDateTime.parse(parts[1].substring(0, parts[1].length() - 1)), uuid(parts[2]));
+        } catch (IllegalArgumentException | java.time.DateTimeException error) {
+            throw invalid("INVALID_CURSOR");
+        }
+    }
+}
