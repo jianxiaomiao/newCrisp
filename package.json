@@ -1,0 +1,13 @@
+{
+  "name": "newcrisp-acceptance",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test:e2e": "bash scripts/test-e2e.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

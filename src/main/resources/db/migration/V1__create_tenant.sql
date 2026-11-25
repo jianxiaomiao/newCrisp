@@ -1,0 +1,11 @@
+CREATE TABLE tenant (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    code VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    name VARCHAR(120) NOT NULL,
+    status VARCHAR(12) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'ACTIVE',
+    created_at DATETIME(3) NOT NULL,
+    updated_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT uk_tenant_code UNIQUE (code),
+    CONSTRAINT ck_tenant_status CHECK (status IN ('ACTIVE', 'DISABLED'))
+) ENGINE = InnoDB DEFAULT CHARACTER SET = utf8mb4;
