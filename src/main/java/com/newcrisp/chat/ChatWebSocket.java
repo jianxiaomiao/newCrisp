@@ -22,6 +22,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -33,6 +34,8 @@ import tools.jackson.databind.ObjectMapper;
 @Component
 class ChatWebSocket extends TextWebSocketHandler {
     static final String SIDE = ChatWebSocket.class.getName() + ".side";
+    private static final CloseStatus ACCESS_CHANGED = new CloseStatus(4003, "Staff access changed");
+    private static final CloseStatus STAFF_DISABLED = new CloseStatus(4004, "Staff disabled");
     private static final Logger log = LoggerFactory.getLogger(ChatWebSocket.class);
     private final ConcurrentMap<String, Peer> peers = new ConcurrentHashMap<>();
     private final Semaphore awaitingAuth = new Semaphore(128);
@@ -97,7 +100,7 @@ class ChatWebSocket extends TextWebSocketHandler {
             send(peer, new ServerFrame("message.ack", requestId, saved));
         } catch (IdentityError error) {
             send(peer, new ServerFrame("error", requestId, new Failure(error.code, error.status.value())));
-            if (error.status == HttpStatus.UNAUTHORIZED || peer.actor == null) drop(peer, true);
+            if (!closeForAccessError(peer, error) && peer.actor == null) drop(peer, true);
         } catch (JacksonException invalidJson) {
             send(peer, new ServerFrame("error", requestId, new Failure("INVALID_FRAME", 400)));
             if (peer.actor == null) drop(peer, true);
@@ -154,7 +157,7 @@ class ChatWebSocket extends TextWebSocketHandler {
                 refresh(peer);
                 ping(peer);
             } catch (IdentityError error) {
-                if (error.status == HttpStatus.UNAUTHORIZED) drop(peer, true);
+                closeForAccessError(peer, error);
             }
         }
     }
@@ -200,7 +203,7 @@ class ChatWebSocket extends TextWebSocketHandler {
                 }
                 send(peer, new ServerFrame("sync.required", null, null));
             } catch (IdentityError error) {
-                if (error.status == HttpStatus.UNAUTHORIZED) drop(peer, true);
+                closeForAccessError(peer, error);
                 if (error.status == HttpStatus.SERVICE_UNAVAILABLE) unavailable = error;
             }
         }
@@ -214,6 +217,30 @@ class ChatWebSocket extends TextWebSocketHandler {
             if (access != null && access.side() == event.side() && access.sid().equals(event.sid())) drop(peer, true);
         }
         presence.revoke(event.sid());
+    }
+
+    @TransactionalEventListener
+    void staffAccessChanged(ChatIdentity.StaffAccessChanged event) {
+        for (Peer peer : peers.values()) {
+            var access = peer.access;
+            if (access == null || access.side() != Side.STAFF || access.tenantId() != event.tenantId()
+                    || !access.actorId().equals(event.staffId())) continue;
+            if (event.disabled() || access.staffAccessVersion() == null || access.staffAccessVersion() < event.accessVersion()) {
+                drop(peer, event.disabled() ? STAFF_DISABLED : ACCESS_CHANGED, true);
+            }
+        }
+    }
+
+    private boolean closeForAccessError(Peer peer, IdentityError error) {
+        if ("STAFF_ACCESS_CHANGED".equals(error.code)) {
+            drop(peer, ACCESS_CHANGED, true);
+            return true;
+        }
+        if (error.status == HttpStatus.UNAUTHORIZED) {
+            drop(peer, true);
+            return true;
+        }
+        return false;
     }
 
     private void send(Peer peer, ServerFrame frame) {
@@ -237,10 +264,14 @@ class ChatWebSocket extends TextWebSocketHandler {
     }
 
     private void drop(Peer peer, boolean revoked) {
+        drop(peer, revoked ? CloseStatus.POLICY_VIOLATION : CloseStatus.GOING_AWAY, revoked);
+    }
+
+    private void drop(Peer peer, CloseStatus status, boolean revoked) {
         peers.remove(peer.socket.getId(), peer);
         releaseAuthSlot(peer);
         if (revoked) presence.forget(peer.socket.getId());
-        try { peer.socket.close(revoked ? CloseStatus.POLICY_VIOLATION : CloseStatus.GOING_AWAY); }
+        try { peer.socket.close(status); }
         catch (IOException ignored) { /* transport is already gone */ }
     }
 

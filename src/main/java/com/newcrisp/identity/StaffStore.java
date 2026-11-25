@@ -48,7 +48,7 @@ class StaffStore {
 
     Optional<StaffProfile> session(String sid, LocalDateTime now) {
         return jdbc.sql("""
-                SELECT t.code, t.name, a.email, a.id, a.tenant_id,
+                SELECT t.code, t.name, a.email, a.id, a.tenant_id, a.access_version,
                     IF(r.role_code IS NULL, 'STAFF', 'TENANT_ADMIN') AS role_code,
                     EXISTS(SELECT 1 FROM staff_department_role d WHERE d.tenant_id = a.tenant_id
                            AND d.staff_id = a.id AND d.role_code = 'AGENT') AS can_queue,
@@ -61,7 +61,8 @@ class StaffStore {
                 WHERE s.sid = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND a.enabled AND t.status = 'ACTIVE'
                 """).params(sid, now).query((rs, row) -> new StaffProfile(rs.getString("code"),
                 rs.getString("name"), rs.getString("email"), rs.getString("role_code"),
-                rs.getString("id"), rs.getLong("tenant_id"), rs.getBoolean("can_queue"), rs.getBoolean("can_supervise"))).optional();
+                rs.getString("id"), rs.getLong("tenant_id"), rs.getBoolean("can_queue"), rs.getBoolean("can_supervise"),
+                Long.toString(rs.getLong("access_version")))).optional();
     }
 
     String createMember(long tenantId, String departmentCode, String email, String passwordHash, String role, String displayName) {
@@ -77,5 +78,6 @@ class StaffStore {
 
     record LoginAccount(long tenantId, String id, String passwordHash) {}
     record StaffProfile(String tenantCode, String tenantName, String email, String role, String staffId,
-                        @com.fasterxml.jackson.annotation.JsonIgnore long tenantId, boolean canQueue, boolean canSupervise) {}
+                        @com.fasterxml.jackson.annotation.JsonIgnore long tenantId, boolean canQueue, boolean canSupervise,
+                        String accessVersion) {}
 }

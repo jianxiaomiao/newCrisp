@@ -13,6 +13,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.Set;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class ChatServiceTest {
@@ -22,15 +23,21 @@ class ChatServiceTest {
     private static final String KEY = "8c9e4205-0a40-4ca3-9d3b-0979056af040";
     private final ChatStore store = mock(ChatStore.class);
     private final ChatService service = new ChatService(store, CLOCK);
-    private final Actor customer = new Actor(Side.CUSTOMER, 1, "customer", "support", Set.of(), Set.of());
-    private final Actor owner = new Actor(Side.STAFF, 1, "agent", null, Set.of("support"), Set.of());
-    private final Actor supervisor = new Actor(Side.STAFF, 1, "manager", null, Set.of(), Set.of("support"));
+    private final Actor customer = new Actor(Side.CUSTOMER, 1, "customer", "support", Set.of(), Set.of(), 0);
+    private final Actor owner = new Actor(Side.STAFF, 1, "agent", null, Set.of("support"), Set.of(), 0);
+    private final Actor supervisor = new Actor(Side.STAFF, 1, "manager", null, Set.of(), Set.of("support"), 0);
+
+    @BeforeEach
+    void currentRoles() {
+        when(store.lockStaffAccess(owner)).thenReturn(true);
+        when(store.lockStaffAccess(supervisor)).thenReturn(true);
+    }
 
     @Test
     void checksTenantAndAssignmentEvenWhenIdsAreKnown() {
         var chat = conversation("agent", State.ACTIVE, 1, 5);
-        var outsider = new Actor(Side.STAFF, 9, "agent", null, Set.of("support"), Set.of("support"));
-        var peer = new Actor(Side.STAFF, 1, "other", null, Set.of("support"), Set.of());
+        var outsider = new Actor(Side.STAFF, 9, "agent", null, Set.of("support"), Set.of("support"), 0);
+        var peer = new Actor(Side.STAFF, 1, "other", null, Set.of("support"), Set.of(), 0);
         assertThat(ChatService.canRead(customer, chat)).isTrue();
         assertThat(ChatService.canRead(owner, chat)).isTrue();
         assertThat(ChatService.canRead(supervisor, chat)).isTrue();
@@ -45,6 +52,14 @@ class ChatServiceTest {
 
         assertThatThrownBy(() -> service.send(owner, ID, new Send(KEY, "消息", "1"))).hasMessage("STATE_VERSION_CHANGED");
         verify(store, never()).append(any(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void permissionChangeBeforeTheWriteLockStopsAnAlreadyAuthenticatedCommand() {
+        when(store.lockStaffAccess(owner)).thenReturn(false);
+
+        assertThatThrownBy(() -> service.send(owner, ID, new Send(KEY, "消息", "1"))).hasMessage("STAFF_ACCESS_CHANGED");
+        verify(store, never()).find(anyLong(), anyString(), anyBoolean());
     }
 
     @Test

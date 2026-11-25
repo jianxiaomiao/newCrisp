@@ -220,6 +220,144 @@ test.describe('Nexus login against isolated MySQL', () => {
     }
   });
 
+  test('tenant management isolates administrators and revokes open staff tabs and sockets', async ({ page, browser, request }) => {
+    test.setTimeout(100_000);
+    const contexts = [];
+    const open = async (tenant, email = tenant.adminEmail, password = tenant.adminPassword) => {
+      const context = await browser.newContext({ baseURL: process.env.NEWCRISP_PUBLIC_ORIGIN });
+      contexts.push(context);
+      return openStaff(context, tenant, email, password);
+    };
+    const password = 'Management-Test!2026';
+    const agentEmail = 'management-agent@example.test';
+    const otherEmail = 'management-other@example.test';
+    const account = { email: 'management-customer@example.test', password: 'Nexus-Management!2026' };
+    const staff = '/api/v1/staff';
+    const confidential = '仅客户支持部门可见的会话';
+
+    try {
+      const [admin, otherAdmin] = await Promise.all([open(first), open(second)]);
+      await admin.getByLabel('新部门代码').fill('billing');
+      await admin.getByLabel('部门名称', { exact: true }).fill('账单组');
+      await admin.getByRole('button', { name: '创建部门' }).click();
+      await expect(admin.getByRole('status')).toHaveText('部门已创建。');
+      const billingRow = admin.getByRole('list', { name: '部门', exact: true }).getByRole('listitem').filter({ hasText: '账单组（billing）' });
+      await billingRow.getByText('调整 账单组（billing）', { exact: true }).click();
+      await billingRow.getByLabel('部门新名称').fill('账单支持');
+      await billingRow.getByRole('button', { name: '保存部门' }).click();
+      await expect(admin.getByText('调整 账单支持（billing）', { exact: true })).toBeVisible();
+      expect((await write(otherAdmin, `${staff}/departments`, { code: 'foreign', name: '其他租户部门' })).status).toBe(201);
+
+      await createMember(admin, agentEmail, password, 'AGENT');
+      await createMember(otherAdmin, otherEmail, password, 'AGENT');
+      const managedRow = admin.getByRole('list', { name: '员工' }).getByRole('listitem').filter({ hasText: agentEmail });
+      await managedRow.getByText('调整角色', { exact: true }).click();
+      await managedRow.getByLabel('账单支持（billing） · 客服', { exact: true }).check();
+      await managedRow.getByLabel('账单支持（billing） · 主管', { exact: true }).check();
+      await managedRow.getByRole('button', { name: '保存角色' }).click();
+      await expect(admin.getByRole('status')).toHaveText('部门角色已更新。');
+      const departments = (await browserApi(admin, `${staff}/departments`)).data;
+      const billing = departments.find(({ code }) => code === 'billing');
+      expect(billing).toMatchObject({ name: '账单支持', version: '1' });
+      const outsiderDepartment = (await browserApi(otherAdmin, `${staff}/departments`)).data.find(({ code }) => code === 'foreign');
+      const memberList = (await browserApi(admin, `${staff}/members`)).data;
+      const member = memberList.find(({ email }) => email === agentEmail);
+      const outsider = (await browserApi(otherAdmin, `${staff}/members`)).data.find(({ email }) => email === otherEmail);
+      expect(departments.map(({ code }) => code)).toEqual(['billing', 'support']);
+      expect(memberList.map(({ email }) => email)).not.toContain(otherEmail);
+      expect(member.roles).toEqual(expect.arrayContaining([
+        { departmentId: billing.id, role: 'AGENT' }, { departmentId: billing.id, role: 'SUPERVISOR' },
+      ]));
+      const denied = await Promise.all([
+        write(admin, `${staff}/departments/${outsiderDepartment.id}`, { name: '禁止修改', version: outsiderDepartment.version }, 'PUT'),
+        write(admin, `${staff}/members/${outsider.id}/roles`, { roles: [], version: outsider.version }, 'PUT'),
+        write(admin, `${staff}/members/${outsider.id}/disable`, { version: outsider.version }),
+        write(admin, `${staff}/members/${member.id}/roles`, {
+          roles: [{ departmentId: outsiderDepartment.id, role: 'AGENT' }], version: member.version,
+        }, 'PUT'),
+      ]);
+      expect(denied.map(({ status }) => status)).toEqual([404, 404, 404, 404]);
+      expect((await browserApi(otherAdmin, `${staff}/members`)).data.find(({ id }) => id === outsider.id)).toEqual(outsider);
+      expect((await browserApi(otherAdmin, `${staff}/departments`)).data.find(({ id }) => id === outsiderDepartment.id)).toEqual(outsiderDepartment);
+
+      const registration = await request.post(`${nexusApi}/api/auth/register`, { data: { ...account, displayName: '部门隔离客户' } });
+      expect(registration.ok()).toBe(true);
+      await page.goto(`${nexusOrigin}/login`);
+      await signInNexus(page, account);
+      await page.getByRole('button', { name: '在线客服' }).click();
+      await expect(page.getByRole('status')).toHaveText('已通过 Nexus 登录');
+      const id = await startConversation(page, confidential);
+      const path = `${staff}/conversations/${id}`;
+      const agent = await open(first, agentEmail, password);
+      const secondTab = await agent.context().newPage();
+      await secondTab.goto('/staff.html');
+      expect((await browserApi(agent, `${staff}/members`)).status).toBe(403);
+      expect((await write(agent, `${staff}/departments`, { code: 'denied', name: '无管理权限' })).status).toBe(403);
+      const pending = (await browserApi(agent, `${staff}/conversations?view=PENDING`)).data.items.find((row) => row.id === id);
+      const claimed = await write(agent, `${path}/claim`, { stateVersion: pending.stateVersion, actionId: randomUUID() });
+      expect(claimed.status).toBe(200);
+      for (const tab of [agent, secondTab]) {
+        await tab.getByRole('button', { name: '我负责' }).click();
+        await tab.getByRole('button', { name: new RegExp(confidential) }).click();
+        await expect(tab.locator('.chat-log')).toContainText(confidential);
+        await expect(tab.getByRole('button', { name: '发送', exact: true })).toBeVisible();
+      }
+      const oldTicket = (await browserApi(agent, `${staff}/ws-ticket`, { method: 'POST' })).data.ticket;
+      const openProbe = await watchStaffSocket(agent);
+      await expect.poll(() => socketState(agent, openProbe)).toMatchObject({ ready: true, closed: null });
+
+      await managedRow.getByText('调整角色', { exact: true }).click();
+      await managedRow.getByLabel('客户支持（support） · 客服', { exact: true }).uncheck();
+      await managedRow.getByRole('button', { name: '保存角色' }).click();
+      await expect(admin.getByRole('status')).toHaveText('部门角色已更新。');
+      await expect.poll(() => socketState(agent, openProbe)).toEqual({ ready: true, closed: 4003 });
+      const staleProbe = await watchStaffSocket(agent, oldTicket);
+      await expect.poll(() => socketState(agent, staleProbe)).toEqual({ ready: false, closed: 4003 });
+      for (const tab of [agent, secondTab]) {
+        await expect(tab.getByRole('heading', { name: '客服工作台' })).toBeVisible();
+        await expect(tab.getByRole('button', { name: '部门会话' })).toBeVisible();
+        await expect(tab.getByRole('button', { name: '待领取' })).toBeVisible();
+        await expect(tab.getByText(confidential, { exact: true })).toHaveCount(0);
+        await expect(tab.getByRole('button', { name: '发送', exact: true })).not.toBeVisible();
+        await expect(tab.locator('.chat-connection')).toHaveText('');
+      }
+      expect(await browserApi(agent, `${staff}/ws-ticket`, {
+        method: 'POST', headers: { 'X-NewCrisp-Staff-Access': member.version },
+      })).toMatchObject({ status: 409, data: { code: 'STAFF_ACCESS_CHANGED' } });
+      expect((await browserApi(agent, `${path}/messages`)).status).toBe(404);
+      expect((await write(agent, `${path}/messages`, {
+        stateVersion: claimed.data.stateVersion, clientMessageId: randomUUID(), text: '已失去权限',
+      })).status).toBe(404);
+      expect(await socketReply(agent, {
+        type: 'message.send', conversationId: id, stateVersion: claimed.data.stateVersion, text: '已失去权限',
+      })).toMatchObject({ type: 'error', data: { status: 404 } });
+
+      const currentProbe = await watchStaffSocket(agent);
+      const oldAccess = await agent.evaluate(async () => (await (await import('/web-session.js')).webSession('staff').access()).accessToken);
+      await expect.poll(() => socketState(agent, currentProbe)).toMatchObject({ ready: true, closed: null });
+      const independentLogin = await open(first, agentEmail, password);
+      const independentProbe = await watchStaffSocket(independentLogin);
+      await expect.poll(() => socketState(independentLogin, independentProbe)).toMatchObject({ ready: true, closed: null });
+      admin.once('dialog', (dialog) => dialog.accept());
+      await managedRow.getByRole('button', { name: '停用账号' }).click();
+      await expect(managedRow.getByText('已停用', { exact: true })).toBeVisible();
+      for (const [tab, probe] of [[agent, currentProbe], [independentLogin, independentProbe]]) {
+        await expect.poll(async () => [4004, 1008].includes((await socketState(tab, probe)).closed)).toBe(true);
+      }
+      for (const tab of [agent, secondTab, independentLogin]) {
+        await expect(tab.getByRole('heading', { name: '租户管理员登录' })).toBeVisible();
+        await expect(tab.getByRole('button', { name: '待领取' })).toHaveCount(0);
+      }
+      expect((await request.get(`${staff}/me`, { headers: { Authorization: `Bearer ${oldAccess}` } })).status()).toBe(401);
+      expect((await request.post(`${staff}/session`, {
+        headers: { Origin: process.env.NEWCRISP_PUBLIC_ORIGIN }, data: { tenantCode: first.code, email: agentEmail, password },
+      })).status()).toBe(401);
+      expect((await browserApi(otherAdmin, `${staff}/members`)).data.find(({ id }) => id === outsider.id)).toEqual(outsider);
+    } finally {
+      await Promise.all(contexts.map((context) => context.close()));
+    }
+  });
+
   test('Nexus unread badge follows read receipts, the active account and the integration tenant', async ({ page, browser, request }) => {
     test.setTimeout(100_000);
     const primary = { email: 'unread-customer@example.test', password: 'Nexus-Unread!2026' };
@@ -427,6 +565,30 @@ async function createMember(page, email, password, role) {
 
 function write(page, path, body, method = 'POST') {
   return browserApi(page, path, { method, body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+}
+
+function watchStaffSocket(page, ticket) {
+  return page.evaluate(async (previousTicket) => {
+    const auth = (await import('/web-session.js')).webSession('staff');
+    const grant = previousTicket ?? (await (await auth.request('/api/v1/staff/ws-ticket', { method: 'POST' })).json()).ticket;
+    const socket = new WebSocket(new URL('/ws/staff', location.href));
+    const state = { ready: false, closed: null };
+    const key = crypto.randomUUID();
+    window.staffSocketChecks ??= {};
+    window.staffSocketChecks[key] = state;
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'auth', ticket: grant }));
+    socket.onmessage = ({ data }) => {
+      const frame = JSON.parse(data);
+      if (frame.type === 'ready') state.ready = true;
+      if (frame.type === 'ping') socket.send(JSON.stringify({ type: 'pong', nonce: frame.data }));
+    };
+    socket.onclose = (event) => { state.closed = event.code; };
+    return key;
+  }, ticket);
+}
+
+function socketState(page, key) {
+  return page.evaluate((id) => window.staffSocketChecks[id], key);
 }
 
 async function pollQueue(page) {

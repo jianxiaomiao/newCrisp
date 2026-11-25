@@ -1,28 +1,40 @@
-const sessions = new Map();
+export type SessionSide = 'staff' | 'customer';
+type Phase = 'ready' | 'rotating' | 'closed' | 'unknown';
+type SharedSession = { sid: string; phase: Phase; launch?: string };
+type CookiePair = { sid: string; csrf: string; launch: boolean };
+type Credentials = { tenantCode: string; email: string; password: string };
+type AccessToken = { accessToken: string; sessionId: string; expiresAt: string };
+type LiveAccess = AccessToken & { expires: number };
+
+const sessions = new Map<SessionSide, BrowserSession>();
 const sidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const csrfPattern = /^[a-f0-9]{64}$/;
 
-class SessionError extends Error {
-  constructor(status, code) {
+export class SessionError extends Error {
+  constructor(readonly status: number, readonly code: string) {
     super(code);
-    this.status = status;
-    this.code = code;
   }
 }
 
-export function webSession(side) {
-  if (!sessions.has(side)) sessions.set(side, new BrowserSession(side));
-  return sessions.get(side);
+export function webSession(side: SessionSide) {
+  let session = sessions.get(side);
+  if (!session) {
+    session = new BrowserSession(side);
+    sessions.set(side, session);
+  }
+  return session;
 }
 
 class BrowserSession {
-  constructor(side) {
-    this.side = side;
+  private readonly base: string;
+  private readonly key: string;
+  private jwt?: LiveAccess;
+  private refreshing?: Promise<LiveAccess>;
+  private readonly listeners = new Set<() => void>();
+
+  constructor(private readonly side: SessionSide) {
     this.base = `/api/v1/${side}`;
     this.key = `newcrisp-session:${side}`;
-    this.jwt = undefined;
-    this.refreshing = undefined;
-    this.listeners = new Set();
     window.addEventListener('storage', (event) => {
       if (event.key !== this.key) return;
       const shared = this.shared();
@@ -33,53 +45,57 @@ class BrowserSession {
     });
   }
 
-  onChange(listener) { this.listeners.add(listener); }
+  onChange(listener: () => void) {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
 
-  notify() { for (const listener of this.listeners) listener(); }
+  private notify() { for (const listener of this.listeners) listener(); }
 
-  shared() {
+  private shared(): SharedSession | null {
     const raw = localStorage.getItem(this.key);
+    if (raw === null) return null;
     try { return JSON.parse(raw); } catch { return null; }
   }
 
-  save(sid, phase, launch = this.shared()?.launch) {
+  private save(sid: string, phase: Phase, launch = this.shared()?.launch) {
     localStorage.setItem(this.key, JSON.stringify({ sid, phase, launch }));
   }
 
-  cookie(launch) {
+  private cookie(launch: boolean): CookiePair | null {
     const name = `__Host-newcrisp_${launch ? 'launch' : this.side}_csrf=`;
     const raw = document.cookie.split('; ').find((entry) => entry.startsWith(name))?.slice(name.length);
     const [sid, csrf] = raw?.split('.') ?? [];
-    return sidPattern.test(sid) && csrfPattern.test(csrf) ? { sid, csrf, launch } : null;
+    return sid && csrf && sidPattern.test(sid) && csrfPattern.test(csrf) ? { sid, csrf, launch } : null;
   }
 
-  selection() {
+  private selection() {
     const current = this.cookie(false);
     const pending = this.side === 'customer' ? this.cookie(true) : null;
     if (pending && pending.sid !== current?.sid && pending.sid !== this.shared()?.launch) return pending;
     return current;
   }
 
-  lock(action) {
+  private lock<T>(action: () => Promise<T>): Promise<T> {
     if (!navigator.locks) throw new SessionError(503, 'WEB_LOCKS_UNAVAILABLE');
     return navigator.locks.request(this.key, action);
   }
 
-  headers(pair) {
+  private headers(pair: CookiePair): Record<string, string> {
     return {
       'X-NewCrisp-CSRF': pair.csrf,
       ...(pair.launch ? { 'X-NewCrisp-Launch': '1' } : {}),
     };
   }
 
-  install(data) {
-    const expires = Date.parse(data?.expiresAt);
+  private install(data: AccessToken | null) {
+    const expires = typeof data?.expiresAt === 'string' ? Date.parse(data.expiresAt) : NaN;
     if (typeof data?.accessToken !== 'string' || !sidPattern.test(data.sessionId) || !Number.isFinite(expires)
         || this.cookie(false)?.sid !== data.sessionId) throw new SessionError(503, 'SESSION_RESULT_UNKNOWN');
     return this.jwt = { ...data, expires };
   }
 
-  async login(credentials) {
+  async login(credentials: Credentials) {
     return this.lock(async () => {
       const response = await fetch(`${this.base}/session`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -106,7 +122,7 @@ class BrowserSession {
     finally { if (this.refreshing === work) this.refreshing = undefined; }
   }
 
-  async rotate() {
+  private async rotate() {
     // Cookies can change while this tab waits for another tab to finish rotating.
     const pair = this.selection();
     if (!pair) throw new SessionError(401, 'SESSION_REQUIRED');
@@ -133,22 +149,24 @@ class BrowserSession {
       return token;
     } catch (error) {
       this.jwt = undefined;
-      this.save(pair.sid, error.status === 401 ? 'closed' : 'unknown');
+      this.save(pair.sid, error instanceof SessionError && error.status === 401 ? 'closed' : 'unknown');
       this.notify();
       throw error;
     }
   }
 
-  async request(path, options = {}, expectedSid) {
-    const unauthorized = (code) => new Response(JSON.stringify({ code }), {
+  async request(path: string, options: RequestInit = {}, expectedSid?: string) {
+    const unauthorized = (code: string) => new Response(JSON.stringify({ code }), {
       status: 401, headers: { 'Content-Type': 'application/json' },
     });
     try {
       const access = await this.access();
       if (expectedSid && access.sessionId !== expectedSid) return unauthorized('SESSION_CHANGED');
-      const send = (token) => fetch(path, { ...options, cache: 'no-store',
-        headers: { ...options.headers, Authorization: `Bearer ${token.accessToken}` },
-      });
+      const send = (token: LiveAccess) => {
+        const headers = new Headers(options.headers);
+        headers.set('Authorization', `Bearer ${token.accessToken}`);
+        return fetch(path, { ...options, cache: 'no-store', headers });
+      };
       const response = await send(access);
       if (this.selection()?.sid !== access.sessionId) return unauthorized('SESSION_CHANGED');
       const safe = !options.method || options.method === 'GET' || path.endsWith('/ws-ticket');
@@ -160,7 +178,7 @@ class BrowserSession {
       const recovered = await send(retry);
       return this.selection()?.sid === retry.sessionId ? recovered : unauthorized('SESSION_CHANGED');
     } catch (error) {
-      if (error.status === 401) return unauthorized(error.code);
+      if (error instanceof SessionError && error.status === 401) return unauthorized(error.code);
       throw error;
     }
   }
@@ -180,3 +198,5 @@ class BrowserSession {
 
   currentId() { return this.jwt?.sessionId; }
 }
+
+export type { BrowserSession };

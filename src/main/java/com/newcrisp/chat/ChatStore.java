@@ -27,6 +27,13 @@ class ChatStore {
                 .params(actor.tenantId(), actor.id()).query(String.class).optional().isPresent();
     }
 
+    boolean lockStaffAccess(Actor actor) {
+        return jdbc.sql("""
+                SELECT access_version FROM staff_account WHERE tenant_id = ? AND id = ? AND enabled FOR SHARE
+                """).params(actor.tenantId(), actor.id()).query(Long.class).optional()
+                .filter(version -> version == actor.accessVersion()).isPresent();
+    }
+
     Optional<Conversation> active(Actor actor) {
         return jdbc.sql("SELECT * FROM conversation WHERE tenant_id = ? AND customer_id = ? AND active_marker = 1 FOR UPDATE")
                 .params(actor.tenantId(), actor.id()).query(ChatStore::conversation).optional();

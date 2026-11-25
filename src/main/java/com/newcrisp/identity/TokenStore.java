@@ -48,18 +48,19 @@ class TokenStore {
                 .params(utc(now), hash, utc(now)).update() == 1;
     }
 
-    void insertTicket(Subject subject, byte[] hash, Instant expires, Instant accessExpires) {
+    void insertTicket(Subject subject, byte[] hash, Instant expires, Instant accessExpires, Long staffAccessVersion) {
         jdbc.sql("INSERT INTO websocket_ticket (token_hash, " + column(subject.side())
-                + ", expires_at, access_expires_at) VALUES (?, ?, ?, ?)")
-                .params(hash, subject.sid(), utc(expires), utc(accessExpires)).update();
+                + ", expires_at, access_expires_at, staff_access_version) VALUES (?, ?, ?, ?, ?)")
+                .params(hash, subject.sid(), utc(expires), utc(accessExpires), staffAccessVersion).update();
     }
 
     Optional<Ticket> ticket(Side side, byte[] hash, Instant now) {
         String column = column(side);
-        return jdbc.sql("SELECT " + column + " AS sid, access_expires_at FROM websocket_ticket WHERE token_hash = ? "
+        return jdbc.sql("SELECT " + column + " AS sid, access_expires_at, staff_access_version FROM websocket_ticket WHERE token_hash = ? "
                 + "AND " + column + " IS NOT NULL AND expires_at > ?")
                 .params(hash, utc(now)).query((rs, row) -> new Ticket(rs.getString("sid"),
-                        rs.getObject("access_expires_at", LocalDateTime.class).toInstant(ZoneOffset.UTC))).optional();
+                        rs.getObject("access_expires_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
+                        rs.getObject("staff_access_version", Long.class))).optional();
     }
 
     boolean consumeTicket(Side side, byte[] hash, Instant now) {
@@ -89,5 +90,5 @@ class TokenStore {
 
     record Session(Subject subject, Instant expiresAt) {}
     record Refresh(String sid, boolean bootstrap, boolean used, Instant expiresAt) {}
-    record Ticket(String sid, Instant accessExpiresAt) {}
+    record Ticket(String sid, Instant accessExpiresAt, Long staffAccessVersion) {}
 }

@@ -2,6 +2,7 @@ package com.newcrisp.chat;
 
 import static com.newcrisp.chat.ChatModels.*;
 
+import com.newcrisp.identity.ChatIdentity;
 import com.newcrisp.identity.ChatIdentity.Actor;
 import com.newcrisp.identity.IdentityError;
 import java.nio.charset.StandardCharsets;
@@ -39,6 +40,7 @@ class ChatService {
         String requested = first ? null : uuid(id);
         LocalDateTime now = LocalDateTime.now(clock);
         if (actor.customer() && !store.lockCustomer(actor)) throw IdentityError.unauthorized();
+        requireStaffAccess(actor);
 
         Conversation conversation = first ? null : require(actor, requested, true);
         if (conversation != null && !canRead(actor, conversation)) throw IdentityError.notFound();
@@ -80,6 +82,7 @@ class ChatService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     ActionResult action(Actor actor, String id, Operation op, Action input) {
         if (actor.customer()) throw forbidden();
+        requireStaffAccess(actor);
         String key = uuid(input.actionId());
         long version = number(input.stateVersion());
         Long seen = op == Operation.CLOSE ? number(input.observedCustomerSeq()) : null;
@@ -132,6 +135,7 @@ class ChatService {
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
     void read(Actor actor, String id, Read input) {
+        requireStaffAccess(actor);
         var chat = require(actor, uuid(id), true);
         if (!canRead(actor, chat)) throw IdentityError.notFound();
         if (!actor.customer()) {
@@ -196,6 +200,10 @@ class ChatService {
 
     private Conversation require(Actor actor, String id, boolean lock) {
         return store.find(actor.tenantId(), id, lock).orElseThrow(IdentityError::notFound);
+    }
+
+    private void requireStaffAccess(Actor actor) {
+        if (!actor.customer() && !store.lockStaffAccess(actor)) throw ChatIdentity.accessChanged();
     }
 
     private static void checkVersion(Conversation chat, long expected) {

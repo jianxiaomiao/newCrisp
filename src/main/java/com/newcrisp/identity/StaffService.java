@@ -40,8 +40,7 @@ class StaffService {
 
     @Transactional
     String createMember(String sid, String departmentCode, String email, String password, String role, String displayName) {
-        var profile = profile(sid);
-        if (!"TENANT_ADMIN".equals(profile.role())) throw new IdentityError(HttpStatus.FORBIDDEN, "TENANT_ADMIN_REQUIRED");
+        var profile = admin(sid);
         try {
             String name = displayName == null || displayName.isBlank() ? "客服" : displayName.strip();
             return store.createMember(profile.tenantId(), departmentCode, normalizeEmail(email), encodeNewPassword(password), role, name);
@@ -75,6 +74,12 @@ class StaffService {
 
     StaffStore.StaffProfile profile(String sid) {
         return store.session(sid, LocalDateTime.now(clock)).orElseThrow(IdentityError::unauthorized);
+    }
+
+    StaffStore.StaffProfile admin(String sid) {
+        var profile = profile(sid);
+        if (!"TENANT_ADMIN".equals(profile.role())) throw new IdentityError(HttpStatus.FORBIDDEN, "TENANT_ADMIN_REQUIRED");
+        return profile;
     }
 
     private static String normalizeEmail(String email) {

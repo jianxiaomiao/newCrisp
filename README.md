@@ -4,7 +4,18 @@
 
 ## 本地工具
 
-需要 JDK 21、Maven、Node.js 20 或更高版本、npm 和运行中的 Docker Desktop 或 Docker Engine。本机已安装 IntelliJ IDEA 时，可以直接使用它内置的 Maven。
+需要 JDK 21、Maven、Node.js 20.19+ 或 22.12+、npm 和运行中的 Docker Desktop 或 Docker Engine。本机已安装 IntelliJ IDEA 时，可以直接使用它内置的 Maven。
+
+## 前端与打包
+
+客户页、客服工作台和租户管理使用 Vue 3 与 TypeScript，源码在 `web/`。Vite 在构建时生成页面入口，Spring Boot 从同一来源提供页面、API 和 WebSocket。原有 `/staff.html` 与 `/customer.html` 地址可以继续访问。
+
+```sh
+npm ci
+mvn package
+```
+
+`mvn package` 会运行前端类型检查和 Vite 构建，并把生成文件打进 JAR。单独检查和构建前端可以运行 `npm run build`。
 
 ## 后端测试
 
@@ -22,7 +33,7 @@ npx playwright install chromium --only-shell
 npm run test:e2e
 ```
 
-脚本打包后端，创建临时 MySQL 8.4 容器和 `newcrisp_e2e` 测试库，分配回环数据库端口并生成一次性凭据。Playwright 验证 Flyway V1–V4、平台开通、租户隔离、多标签刷新、令牌重放、票据消费和退出断连。脚本退出时清理本轮容器及其匿名数据卷。
+脚本打包后端，创建临时 MySQL 8.4 容器和 `newcrisp_e2e` 测试库，分配回环数据库端口并生成一次性凭据。Playwright 验证 Flyway V1–V5、平台开通、租户隔离、多标签刷新、令牌重放、票据消费和退出断连。启用 Nexus 测试夹具后，也会用实际会话验收移出部门和停用账号时在用工作台的撤权。脚本退出时清理本轮容器及其匿名数据卷。
 
 下列命令还会验收真实 Nexus 登录、控制台未读角标与读回执、账号切换、WebSocket 消息确认丢失重试、并发领取、断线补读、退回及结束。
 
@@ -55,7 +66,9 @@ Nexus Web 的「在线客服」角标通过 Nexus 后端查询当前登录用户
 
 ## 会话与工作台
 
-租户管理员从 `/staff.html` 的「添加客服成员」为本租户现有部门创建客服或主管。普通客服可以领取本部门待领取会话，主管可以在「部门会话」退回会话。客户从 Nexus 的「在线客服」直接发第一条消息。在「已结束」及「历史会话」可查看各自有权限的历史。
+租户管理员从 `/staff.html` 的「部门管理」创建部门和调整名称，代码在创建时确定。在「员工管理」可以添加成员、按部门分配客服或主管角色，也可以停用员工。取消一个部门的全部角色即移出该部门。角色更新后，打开的工作台会清除原会话视图并以最新权限重连。停用账号会关闭其 WebSocket 并撤销该账号的所有登录会话。
+
+普通客服可以领取本部门待领取会话，主管可以在「部门会话」退回会话。移出部门或停用成员会保留历史操作和在办会话的归属记录，主管可将受影响的在办会话退回队列。客户从 Nexus 的「在线客服」直接发第一条消息。在「已结束」及「历史会话」可查看各自有权限的历史。
 
 WebSocket 入口为 `/ws/customer` 和 `/ws/staff`。页面先用 Bearer Token 调用对应的 `POST /api/v1/{side}/ws-ticket`，再在连接首帧提交 `auth` 和 `ticket`。服务端返回 `ready` 后才允许 `conversation.start` 和 `message.send`。消息提交后返回 `message.ack`，使用 `clientMessageId` 去重。重连领取新票据，页面通过 HTTP 按消息序号补齐缺失消息。反向代理须启用 WebSocket 升级，并允许超过心跳间隔的连接空闲时间。默认 15 秒探测一次，45 秒未确认后离线。
 

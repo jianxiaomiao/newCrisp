@@ -105,23 +105,23 @@ class WebTokens {
         return access;
     }
 
-    String createTicket(Access access) {
+    String createTicket(Access access, Long staffAccessVersion) {
         Instant now = clock.instant();
         Instant expires = now.plus(TICKET_TTL).isBefore(access.expiresAt()) ? now.plus(TICKET_TTL) : access.expiresAt();
         if (!expires.isAfter(now)) throw IdentityError.unauthorized();
         String ticket = IdentityTokens.generate();
-        store.insertTicket(access.subject(), IdentityTokens.digest(ticket), expires, access.expiresAt());
+        store.insertTicket(access.subject(), IdentityTokens.digest(ticket), expires, access.expiresAt(), staffAccessVersion);
         return ticket;
     }
 
-    Access redeemTicket(Side side, String raw) {
+    RedeemedTicket redeemTicket(Side side, String raw) {
         byte[] hash = refreshHash(raw);
         var result = store.ticket(side, hash, clock.instant()).orElseThrow(IdentityError::unauthorized);
         var session = store.session(side, result.sid(), clock.instant(), false).orElseThrow(IdentityError::unauthorized);
         if (!clock.instant().isBefore(result.accessExpiresAt()) || !store.consumeTicket(side, hash, clock.instant())) {
             throw IdentityError.unauthorized();
         }
-        return new Access(session.subject(), result.accessExpiresAt());
+        return new RedeemedTicket(new Access(session.subject(), result.accessExpiresAt()), result.staffAccessVersion());
     }
 
     void logout(Side side, String raw, boolean bootstrap) {
@@ -144,6 +144,7 @@ class WebTokens {
     }
 
     private record Rotation(Issued issued, boolean replay) {}
+    record RedeemedTicket(Access access, Long staffAccessVersion) {}
     record Issued(String refresh, String sid, Instant refreshExpiresAt, AccessJwt.Token access) {
         @Override public String toString() { return "Issued[refreshExpiresAt=" + refreshExpiresAt + "]"; }
     }

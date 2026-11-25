@@ -64,7 +64,7 @@ class WebTokensTest {
                 .thenReturn(Optional.of(new TokenStore.Refresh(SID, false, false, expiry)));
         when(store.session(Side.STAFF, SID, NOW, true)).thenReturn(Optional.of(new TokenStore.Session(SUBJECT, expiry)));
         when(staff.session(SID, TokenStore.utc(NOW))).thenReturn(Optional.of(new StaffStore.StaffProfile("tenant-a", "A",
-                "a@example.test", "STAFF", ID, 12, true, false)));
+                "a@example.test", "STAFF", ID, 12, true, false, "0")));
         when(store.consumeRefresh(aryEq(hash), eq(NOW))).thenReturn(true);
 
         var issued = service.rotate(Side.STAFF, raw, false);
@@ -78,7 +78,7 @@ class WebTokensTest {
     @Test
     void losingTicketConsumptionCannotAuthenticate() {
         when(store.ticket(eq(Side.STAFF), aryEq(hash), eq(NOW)))
-                .thenReturn(Optional.of(new TokenStore.Ticket(SID, NOW.plusSeconds(60))));
+                .thenReturn(Optional.of(new TokenStore.Ticket(SID, NOW.plusSeconds(60), 0L)));
         when(store.session(Side.STAFF, SID, NOW, false)).thenReturn(Optional.of(new TokenStore.Session(SUBJECT, NOW.plusSeconds(60))));
 
         assertThatThrownBy(() -> service.redeemTicket(Side.STAFF, raw)).hasMessage("SESSION_REQUIRED");
