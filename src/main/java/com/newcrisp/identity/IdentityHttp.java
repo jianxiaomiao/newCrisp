@@ -2,6 +2,7 @@ package com.newcrisp.identity;
 
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.HexFormat;
 import jakarta.servlet.http.Cookie;
@@ -11,8 +12,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 
 final class IdentityHttp {
-    static final String STAFF = "__Host-newcrisp_staff";
-    static final String CUSTOMER = "__Host-newcrisp_customer";
     static final String CSRF = "X-NewCrisp-CSRF";
 
     private IdentityHttp() {}
@@ -39,9 +38,32 @@ final class IdentityHttp {
         return value;
     }
 
-    static String cookie(String name, String token, Duration maxAge) {
-        return ResponseCookie.from(name, token).secure(true).httpOnly(true).path("/")
+    private static String cookie(String name, String token, Duration maxAge, boolean httpOnly) {
+        return ResponseCookie.from(name, token).secure(true).httpOnly(httpOnly).path("/")
                 .sameSite("Lax").maxAge(maxAge).build().toString();
+    }
+
+    private static String cookiePrefix(ChatIdentity.Side side, boolean bootstrap) {
+        return "__Host-newcrisp_" + (bootstrap ? "launch" : side == ChatIdentity.Side.STAFF ? "staff" : "customer");
+    }
+
+    static String refreshName(ChatIdentity.Side side, boolean bootstrap) { return cookiePrefix(side, bootstrap) + "_rt"; }
+
+    static HttpHeaders refreshHeaders(ChatIdentity.Side side, boolean bootstrap, WebTokens.Issued issued, Instant now) {
+        var maxAge = Duration.between(now, issued.refreshExpiresAt());
+        if (maxAge.isNegative()) maxAge = Duration.ZERO;
+        var headers = new HttpHeaders();
+        headers.add(HttpHeaders.SET_COOKIE, cookie(refreshName(side, bootstrap), issued.refresh(), maxAge, true));
+        headers.add(HttpHeaders.SET_COOKIE, cookie(cookiePrefix(side, bootstrap) + "_csrf",
+                issued.sid() + "." + csrf(issued.refresh()), maxAge, false));
+        return headers;
+    }
+
+    static HttpHeaders clearRefresh(ChatIdentity.Side side, boolean bootstrap) {
+        var headers = new HttpHeaders();
+        headers.add(HttpHeaders.SET_COOKIE, cookie(refreshName(side, bootstrap), "", Duration.ZERO, true));
+        headers.add(HttpHeaders.SET_COOKIE, cookie(cookiePrefix(side, bootstrap) + "_csrf", "", Duration.ZERO, false));
+        return headers;
     }
 
     static String csrf(String cookieToken) {

@@ -36,16 +36,17 @@ class StaffStore {
                 rs.getLong("tenant_id"), rs.getString("id"), rs.getString("password_hash"))).optional();
     }
 
-    boolean createSession(byte[] hash, LoginAccount account, LocalDateTime expiresAt) {
+    boolean createSession(String sid, LoginAccount account, LocalDateTime expiresAt) {
         return jdbc.sql("""
-                INSERT INTO staff_session (token_hash, tenant_id, staff_id, expires_at)
-                SELECT ?, a.tenant_id, a.id, ? FROM staff_account a
+                INSERT INTO staff_session (token_hash, sid, tenant_id, staff_id, expires_at)
+                SELECT ?, ?, a.tenant_id, a.id, ? FROM staff_account a
                 JOIN tenant t ON t.id = a.tenant_id
                 WHERE a.tenant_id = ? AND a.id = ? AND a.password_hash = ? AND a.enabled AND t.status = 'ACTIVE'
-                """).params(hash, expiresAt, account.tenantId(), account.id(), account.passwordHash()).update() == 1;
+                """).params(IdentityTokens.digest("session:" + sid), sid, expiresAt,
+                account.tenantId(), account.id(), account.passwordHash()).update() == 1;
     }
 
-    Optional<StaffProfile> session(byte[] hash, LocalDateTime now) {
+    Optional<StaffProfile> session(String sid, LocalDateTime now) {
         return jdbc.sql("""
                 SELECT t.code, t.name, a.email, a.id, a.tenant_id,
                     IF(r.role_code IS NULL, 'STAFF', 'TENANT_ADMIN') AS role_code,
@@ -57,8 +58,8 @@ class StaffStore {
                 JOIN tenant t ON t.id = s.tenant_id
                 LEFT JOIN staff_tenant_role r ON r.tenant_id = a.tenant_id AND r.staff_id = a.id
                     AND r.role_code = 'TENANT_ADMIN'
-                WHERE s.token_hash = ? AND s.expires_at > ? AND a.enabled AND t.status = 'ACTIVE'
-                """).params(hash, now).query((rs, row) -> new StaffProfile(rs.getString("code"),
+                WHERE s.sid = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND a.enabled AND t.status = 'ACTIVE'
+                """).params(sid, now).query((rs, row) -> new StaffProfile(rs.getString("code"),
                 rs.getString("name"), rs.getString("email"), rs.getString("role_code"),
                 rs.getString("id"), rs.getLong("tenant_id"), rs.getBoolean("can_queue"), rs.getBoolean("can_supervise"))).optional();
     }
@@ -72,10 +73,6 @@ class StaffStore {
         jdbc.sql("INSERT INTO staff_department_role (tenant_id, department_id, staff_id, role_code) VALUES (?, ?, ?, ?)")
                 .params(tenantId, departmentId, id, role).update();
         return id;
-    }
-
-    void deleteSession(byte[] hash) {
-        jdbc.sql("DELETE FROM staff_session WHERE token_hash = ?").param(hash).update();
     }
 
     record LoginAccount(long tenantId, String id, String passwordHash) {}

@@ -9,7 +9,7 @@ const messages = {
   SEND_RESULT_UNKNOWN: '发送结果待确认，重试会沿用本次发送。',
 };
 
-export function mountChat(root, { side, identity, csrf, canQueue = false, canSupervise = false, expired }) {
+export function mountChat(root, { side, identity, auth, sid, canQueue = false, canSupervise = false, expired }) {
   const customer = side === 'customer';
   const views = customer ? [['CURRENT', '当前会话'], ['HISTORY', '历史会话']] : [
     ...(canQueue ? [['PENDING', '待领取'], ['MINE', '我负责'], ['CLOSED', '已结束']] : []),
@@ -55,11 +55,11 @@ export function mountChat(root, { side, identity, csrf, canQueue = false, canSup
   }
 
   async function api(path, options) {
-    const response = await fetch(base + path, {
+    const response = await auth.request(base + path, {
       cache: 'no-store', signal: abort.signal, ...options,
       headers: { 'X-NewCrisp-Actor': identity,
-        ...(options?.body ? { 'Content-Type': 'application/json', 'X-NewCrisp-CSRF': csrf() } : {}) },
-    });
+        ...(options?.body ? { 'Content-Type': 'application/json' } : {}) },
+    }, sid);
     if (response.ok) return response.status === 204 ? null : response.json();
     if (response.status === 401 && !closed) {
       dispose();
@@ -279,11 +279,35 @@ export function mountChat(root, { side, identity, csrf, canQueue = false, canSup
     sync();
   }
 
-  function openSocket() {
+  function retrySocket() {
     if (closed) return;
+    ready = false;
+    connection.textContent = '正在重连，未确认的消息可以重试。';
+    for (const request of pending.values()) request.reject({ code: 'SEND_RESULT_UNKNOWN' });
+    sync();
+    retryTimer = setTimeout(openSocket, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 8_000);
+  }
+
+  async function openSocket() {
+    if (closed) return;
+    let ticket;
+    try {
+      const grant = await api('/ws-ticket', { method: 'POST' });
+      if (closed) return;
+      if (grant.sessionId !== sid) { dispose(); expired(); return; }
+      ticket = grant.ticket;
+    } catch {
+      retrySocket();
+      return;
+    }
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const source = new WebSocket(`${scheme}://${location.host}/ws/${side}`);
     socket = source;
+    source.addEventListener('open', () => {
+      if (!closed && source === socket) source.send(JSON.stringify({ type: 'auth', ticket }));
+      ticket = undefined;
+    });
     source.addEventListener('message', (event) => {
       if (closed || source !== socket) return;
       const frame = JSON.parse(event.data);
@@ -314,12 +338,7 @@ export function mountChat(root, { side, identity, csrf, canQueue = false, canSup
     });
     source.addEventListener('close', () => {
       if (closed || source !== socket) return;
-      ready = false;
-      connection.textContent = '正在重连，未确认的消息可以重试。';
-      for (const request of pending.values()) request.reject({ code: 'SEND_RESULT_UNKNOWN' });
-      sync();
-      retryTimer = setTimeout(openSocket, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, 8_000);
+      retrySocket();
     });
   }
 

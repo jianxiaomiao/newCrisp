@@ -1,10 +1,11 @@
 import { mountChat } from './chat.js';
+import { webSession } from './web-session.js';
 
 const feedback = document.querySelector('#feedback');
 const profile = document.querySelector('#profile');
 const logout = document.querySelector('#logout');
 const endpoint = '/api/v1/customer';
-let csrf;
+const auth = webSession('customer');
 let profileRevision = 0;
 let chatIdentity;
 let stopChat;
@@ -18,10 +19,9 @@ function clearChat() {
 async function refreshProfile() {
   const revision = ++profileRevision;
   try {
-    const response = await fetch(`${endpoint}/me`, { cache: 'no-store', signal: AbortSignal.timeout(6_000) });
+    const response = await auth.request(`${endpoint}/me`, { signal: AbortSignal.timeout(6_000) });
     if (revision !== profileRevision) return;
     if (response.status === 401) {
-      csrf = undefined;
       clearChat();
       profile.hidden = true;
       feedback.textContent = '请从 Nexus 控制台重新进入在线客服。';
@@ -30,15 +30,15 @@ async function refreshProfile() {
     if (!response.ok) throw new Error('profile unavailable');
     const user = await response.json();
     if (revision !== profileRevision) return;
-    csrf = response.headers.get('X-NewCrisp-CSRF');
     document.querySelector('#tenant').textContent = user.tenantName;
     profile.hidden = false;
     feedback.textContent = '已通过 Nexus 登录';
-    if (chatIdentity !== user.customerId) {
+    const sid = auth.currentId();
+    if (chatIdentity !== sid) {
       clearChat();
-      chatIdentity = user.customerId;
+      chatIdentity = sid;
       stopChat = mountChat(document.querySelector('#chat'), {
-        side: 'customer', identity: chatIdentity, csrf: () => csrf, expired: () => { clearChat(); refreshProfile(); },
+        side: 'customer', identity: user.customerId, auth, sid, expired: () => { clearChat(); refreshProfile(); },
       });
     }
   } catch {
@@ -52,8 +52,7 @@ logout.addEventListener('click', async () => {
   logout.disabled = true;
   profileRevision++;
   try {
-    const response = await fetch(`${endpoint}/session`, { method: 'DELETE', headers: { 'X-NewCrisp-CSRF': csrf } });
-    if (!response.ok) throw new Error('logout unavailable');
+    await auth.logout();
     clearChat();
     await refreshProfile();
   } catch {
@@ -64,6 +63,7 @@ logout.addEventListener('click', async () => {
 });
 
 refreshProfile();
+auth.onChange(() => { clearChat(); refreshProfile(); });
 const refreshWhenVisible = () => { if (!document.hidden && !logout.disabled) refreshProfile(); };
 document.addEventListener('visibilitychange', refreshWhenVisible);
 setInterval(refreshWhenVisible, 30_000);

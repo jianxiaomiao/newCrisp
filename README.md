@@ -12,7 +12,7 @@
 mvn test
 ```
 
-JUnit 和 Mockito 验证身份接入、会话权限、幂等重放、旧负责人状态版本和结束前的已读约束。这组测试不需要启动数据库。
+JUnit 和 Mockito 验证身份接入、JWT 受众与过期、刷新轮换及重放撤销、单次票据，以及会话权限、幂等和结束前的已读约束。这组测试不需要启动数据库。
 
 ## 真实 MySQL 和浏览器验收
 
@@ -22,7 +22,7 @@ npx playwright install chromium --only-shell
 npm run test:e2e
 ```
 
-脚本打包后端，创建临时 MySQL 8.4 容器和 `newcrisp_e2e` 测试库，分配回环数据库端口并生成一次性凭据。Playwright 验证 Flyway V1–V3、平台开通、管理员登录及跨租户隔离。脚本退出时清理本轮容器及其匿名数据卷。
+脚本打包后端，创建临时 MySQL 8.4 容器和 `newcrisp_e2e` 测试库，分配回环数据库端口并生成一次性凭据。Playwright 验证 Flyway V1–V4、平台开通、租户隔离、多标签刷新、令牌重放、票据消费和退出断连。脚本退出时清理本轮容器及其匿名数据卷。
 
 下列命令还会验收真实 Nexus 登录、WebSocket 消息确认丢失重试、并发领取、断线补读、退回及结束。
 
@@ -49,10 +49,19 @@ export NEWCRISP_MAVEN='/Applications/IntelliJ IDEA.app/Contents/plugins/maven/li
 3. 平台调用 `POST /api/v1/platform/tenants/{tenantCode}/nexus-integrations`，提交 `nexusOrigin`，值为实际 Nexus Web 来源（协议、主机、可选端口）。响应中的 `credential` 只在创建时返回。Nexus 后端用 `NEXUS_CHAT_ORIGIN` 指向 NewCrisp 公共来源，用 `NEXUS_CHAT_CREDENTIAL` 保存该凭据。Nexus Web 构建时设置 `VITE_NEXUS_CHAT_ENABLED=true` 显示「在线客服」入口。
 4. 另生成一个独立的 32 字节 Base64url 复核凭据。NewCrisp 使用 `NEWCRISP_NEXUS_VERIFY_KEY` 保存原凭据，`NEWCRISP_NEXUS_VERIFY_URL` 指向 Nexus 的 `/api/internal/support/chat/session-status`。Nexus 使用 `NEXUS_CHAT_VERIFY_KEY_SHA256` 保存该凭据的 SHA-256 十六进制摘要。当前实例接入一个 Nexus 身份源，客户会话的 Nexus 校验结果最多缓存 60 秒。
 
-平台 API 使用运维凭据，管理员和客户使用各自的 Host Cookie。正式环境的公开来源使用 HTTPS。一次性跳转凭证有效 60 秒，浏览器以表单正文提交，兑换前复核 Nexus 会话，消费及创建客户会话原子提交。
+平台 API 使用运维凭据，客户和员工使用各自的 JWT 受众和 Refresh Cookie。正式环境的公开来源使用 HTTPS。Nexus 跳转凭证有效 60 秒，浏览器以表单正文提交。凭证消费与短期开通凭据原子写入，NewCrisp 页面在同源 Web Lock 内开通正式会话。
 
 ## 会话与工作台
 
 租户管理员从 `/staff.html` 的「添加客服成员」为本租户现有部门创建客服或主管。普通客服可以领取本部门待领取会话，主管可以在「部门会话」退回会话。客户从 Nexus 的「在线客服」直接发第一条消息。在「已结束」及「历史会话」可查看各自有权限的历史。
 
-WebSocket 入口为 `/ws/customer` 和 `/ws/staff`。浏览器通过 `conversation.start` 和 `message.send` 发送，服务端提交后返回 `message.ack`，使用 `clientMessageId` 去重。页面从 HTTP 查询队列、历史、已读及发送结果，按消息序号补齐缺失消息。位于反向代理后时，代理须启用 WebSocket 升级，并允许超过心跳间隔的连接空闲时间。默认 15 秒探测一次，45 秒未确认后离线。
+WebSocket 入口为 `/ws/customer` 和 `/ws/staff`。页面先用 Bearer Token 调用对应的 `POST /api/v1/{side}/ws-ticket`，再在连接首帧提交 `auth` 和 `ticket`。服务端返回 `ready` 后才允许 `conversation.start` 和 `message.send`。消息提交后返回 `message.ack`，使用 `clientMessageId` 去重。重连领取新票据，页面通过 HTTP 按消息序号补齐缺失消息。反向代理须启用 WebSocket 升级，并允许超过心跳间隔的连接空闲时间。默认 15 秒探测一次，45 秒未确认后离线。
+
+## JWT 与 Refresh Token
+
+- Access JWT 默认 5 分钟有效，使用 RS256，Web 只在内存保存。客户与员工的受众独立，服务端每次鉴权检查会话撤销状态，业务操作继续检查租户、角色和会话权限。
+- Refresh Token 为随机不透明值，通过 `HttpOnly`、`Secure`、`SameSite=Lax` Cookie 提交到 `POST /api/v1/{side}/session/refresh`。同时校验 Origin 和配套 CSRF 值。MySQL 只保存摘要、所属会话、到期及消费时间。会话最长 8 小时。旧令牌重放会撤销同一个 `sid` 下的全部凭据并关闭已有连接。
+- 两个标签页通过同源 Web Lock 串行刷新。浏览器只共享会话标识和刷新状态。请求结果不确定时，要求重新认证。Nexus 客户刷新前须复核关联登录会话。
+- WebSocket 票据只消费一次，最长 30 秒有效，首帧须在连接后 5 秒内提交。连接权限不超过对应 Access JWT 的有效期。登出立即撤销会话并关闭当前实例上的对应连接。
+
+部署时设置 `NEWCRISP_JWT_KID` 和 `NEWCRISP_JWT_PRIVATE_KEY`。私钥格式为至少 2048 位 RSA、PKCS#8 DER 的单行 Base64。轮换时用 `NEWCRISP_JWT_PREVIOUS_KID` 和 `NEWCRISP_JWT_PREVIOUS_PUBLIC_KEY` 保留上一把验签公钥，公钥格式为 X.509 DER 的单行 Base64，待旧 Access JWT 到期后移除。回环开发环境可以省略私钥，进程启动时生成临时密钥。升级前的浏览器 Cookie 会话需重新登录或从 Nexus 重新进入。

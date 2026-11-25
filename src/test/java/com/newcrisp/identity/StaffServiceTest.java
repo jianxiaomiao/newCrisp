@@ -14,7 +14,6 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -25,12 +24,13 @@ class StaffServiceTest {
 
     @Mock StaffStore store;
     @Mock PasswordEncoder encoder;
+    @Mock WebTokens tokens;
     StaffService staff;
 
     @BeforeEach
     void setUp() {
         when(encoder.encode(anyString())).thenReturn("encoded-password");
-        staff = new StaffService(store, encoder, CLOCK);
+        staff = new StaffService(store, encoder, CLOCK, tokens);
     }
 
     @Test
@@ -57,15 +57,21 @@ class StaffServiceTest {
     }
 
     @Test
-    void bindsSessionToAuthenticatedTenantAccountAndStoresOnlyDigest() {
+    void bindsTokensToTheNewSessionAndAuthenticatedTenantAccount() {
         var account = new StaffStore.LoginAccount(17, "staff-a", "password-a");
         when(store.loginAccount("tenant-a", "admin@example.test")).thenReturn(Optional.of(account));
         when(encoder.matches(PASSWORD, "password-a")).thenReturn(true);
         when(store.createSession(any(), eq(account), any())).thenReturn(true);
+        when(tokens.initial(any(), any(), eq(false))).thenAnswer(call -> {
+            AccessJwt.Subject subject = call.getArgument(0);
+            return new WebTokens.Issued("refresh", subject.sid(), call.getArgument(1), null);
+        });
 
-        String token = staff.login("tenant-a", "ADMIN@example.test", PASSWORD);
+        var issued = staff.login("tenant-a", "ADMIN@example.test", PASSWORD);
 
-        verify(store).createSession(aryEq(IdentityTokens.digest(token)), eq(account), eq(LocalDateTime.now(CLOCK).plusHours(8)));
+        verify(store).createSession(issued.sid(), account, LocalDateTime.now(CLOCK).plusHours(8));
+        verify(tokens).initial(new AccessJwt.Subject(ChatIdentity.Side.STAFF, 17, "staff-a", issued.sid()),
+                CLOCK.instant().plusSeconds(8 * 3600), false);
     }
 
     @Test

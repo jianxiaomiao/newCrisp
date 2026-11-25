@@ -26,6 +26,7 @@ test('platform provisions an isolated tenant and its first administrator logs in
   expect((await browserApi(page, '/api/v1/staff/tenants/staff-a')).status).toBe(200);
   expect((await browserApi(page, '/api/v1/staff/tenants/staff-b')).status).toBe(404);
   expect((await browserApi(page, '/api/v1/customer/me')).status).toBe(401);
+  expect(await page.evaluate(async () => (await fetch('/api/v1/staff/me')).status)).toBe(401);
   expect((await browserApi(page, '/api/v1/staff/session', { method: 'DELETE' })).status).toBe(403);
   await page.getByLabel('成员邮箱').fill('staff-agent@example.test');
   await page.getByLabel('初始密码').fill('Temporary-Password!2026');
@@ -36,7 +37,7 @@ test('platform provisions an isolated tenant and its first administrator logs in
   })).status).toBe(401);
 
   const cookies = await page.context().cookies();
-  expect(cookies.find((cookie) => cookie.name === '__Host-newcrisp_staff')).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Lax' });
+  expect(cookies.find((cookie) => cookie.name === '__Host-newcrisp_staff_rt')).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Lax' });
   await page.getByRole('button', { name: '退出登录' }).click();
   await expect(page.getByRole('heading', { name: '租户管理员登录' })).toBeVisible();
   expect((await browserApi(page, '/api/v1/staff/me')).status).toBe(401);

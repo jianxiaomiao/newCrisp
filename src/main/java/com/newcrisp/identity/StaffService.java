@@ -5,6 +5,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Locale;
+import java.util.UUID;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -17,12 +18,14 @@ class StaffService {
     private final StaffStore store;
     private final PasswordEncoder encoder;
     private final Clock clock;
+    private final WebTokens tokens;
     private final String dummyHash;
 
-    StaffService(StaffStore store, PasswordEncoder encoder, Clock clock) {
+    StaffService(StaffStore store, PasswordEncoder encoder, Clock clock, WebTokens tokens) {
         this.store = store;
         this.encoder = encoder;
         this.clock = clock;
+        this.tokens = tokens;
         this.dummyHash = encoder.encode(IdentityTokens.generate());
     }
 
@@ -36,8 +39,8 @@ class StaffService {
     }
 
     @Transactional
-    String createMember(String token, String departmentCode, String email, String password, String role, String displayName) {
-        var profile = profile(token);
+    String createMember(String sid, String departmentCode, String email, String password, String role, String displayName) {
+        var profile = profile(sid);
         if (!"TENANT_ADMIN".equals(profile.role())) throw new IdentityError(HttpStatus.FORBIDDEN, "TENANT_ADMIN_REQUIRED");
         try {
             String name = displayName == null || displayName.isBlank() ? "客服" : displayName.strip();
@@ -55,25 +58,23 @@ class StaffService {
         return encoder.encode(password);
     }
 
-    String login(String code, String email, String password) {
+    @Transactional
+    WebTokens.Issued login(String code, String email, String password) {
         if (password.getBytes(StandardCharsets.UTF_8).length > 72) throw IdentityError.unauthorized();
         var account = store.loginAccount(code, normalizeEmail(email));
         String hash = account.map(StaffStore.LoginAccount::passwordHash).orElse(dummyHash);
         if (!encoder.matches(password, hash) || account.isEmpty()) throw IdentityError.unauthorized();
-        String token = IdentityTokens.generate();
-        if (!store.createSession(IdentityTokens.digest(token), account.get(), LocalDateTime.now(clock).plus(SESSION_TTL))) {
+        var principal = account.orElseThrow();
+        String sid = UUID.randomUUID().toString();
+        var expiry = clock.instant().plus(SESSION_TTL);
+        if (!store.createSession(sid, principal, TokenStore.utc(expiry))) {
             throw IdentityError.unauthorized();
         }
-        return token;
+        return tokens.initial(new AccessJwt.Subject(ChatIdentity.Side.STAFF, principal.tenantId(), principal.id(), sid), expiry, false);
     }
 
-    StaffStore.StaffProfile profile(String token) {
-        if (!IdentityTokens.valid(token)) throw IdentityError.unauthorized();
-        return store.session(IdentityTokens.digest(token), LocalDateTime.now(clock)).orElseThrow(IdentityError::unauthorized);
-    }
-
-    void logout(String token) {
-        if (IdentityTokens.valid(token)) store.deleteSession(IdentityTokens.digest(token));
+    StaffStore.StaffProfile profile(String sid) {
+        return store.session(sid, LocalDateTime.now(clock)).orElseThrow(IdentityError::unauthorized);
     }
 
     private static String normalizeEmail(String email) {

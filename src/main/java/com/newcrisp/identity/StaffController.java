@@ -1,13 +1,12 @@
 package com.newcrisp.identity;
 
-import java.time.Duration;
+import java.time.Clock;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -20,56 +19,46 @@ class StaffController {
     static final String TENANT_CODE = "[a-z][a-z0-9-]{2,47}";
     private final StaffService staff;
     private final IdentityConfiguration.Settings settings;
-    private final ApplicationEventPublisher events;
+    private final WebTokens tokens;
+    private final Clock clock;
 
-    StaffController(StaffService staff, IdentityConfiguration.Settings settings, ApplicationEventPublisher events) {
+    StaffController(StaffService staff, IdentityConfiguration.Settings settings, WebTokens tokens, Clock clock) {
         this.staff = staff;
         this.settings = settings;
-        this.events = events;
+        this.tokens = tokens;
+        this.clock = clock;
     }
 
     @PostMapping(value = "/session", consumes = MediaType.APPLICATION_JSON_VALUE)
-    ResponseEntity<Void> login(@Valid @RequestBody Login input, HttpServletRequest request) {
+    ResponseEntity<AccessJwt.Token> login(@Valid @RequestBody Login input, HttpServletRequest request) {
         IdentityHttp.requireOrigin(request, settings.publicOrigin());
-        String token = staff.login(input.tenantCode(), input.email(), input.password());
-        return ResponseEntity.noContent().cacheControl(CacheControl.noStore())
-                .header(HttpHeaders.SET_COOKIE, IdentityHttp.cookie(IdentityHttp.STAFF, token, StaffService.SESSION_TTL)).build();
+        var issued = staff.login(input.tenantCode(), input.email(), input.password());
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .headers(IdentityHttp.refreshHeaders(ChatIdentity.Side.STAFF, false, issued, clock.instant())).body(issued.access());
     }
 
     @GetMapping("/me")
     ResponseEntity<StaffStore.StaffProfile> me(HttpServletRequest request) {
-        String token = IdentityHttp.token(request, IdentityHttp.STAFF);
-        var profile = staff.profile(token);
-        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).header(IdentityHttp.CSRF, IdentityHttp.csrf(token))
-                .body(profile);
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(staff.profile(sid(request)));
     }
 
     @GetMapping("/tenants/{tenantCode}")
     ResponseEntity<TenantView> tenant(@PathVariable String tenantCode, HttpServletRequest request) {
-        var profile = staff.profile(IdentityHttp.token(request, IdentityHttp.STAFF));
+        var profile = staff.profile(sid(request));
         if (!profile.tenantCode().equals(tenantCode)) throw IdentityError.notFound();
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .body(new TenantView(profile.tenantCode(), profile.tenantName()));
     }
 
-    @DeleteMapping("/session")
-    ResponseEntity<Void> logout(HttpServletRequest request) {
-        IdentityHttp.requireOrigin(request, settings.publicOrigin());
-        String token = IdentityHttp.token(request, IdentityHttp.STAFF);
-        IdentityHttp.requireCsrf(request, token);
-        staff.logout(token);
-        events.publishEvent(new ChatIdentity.SessionEnded(new ChatIdentity.Credential(ChatIdentity.Side.STAFF, token)));
-        return ResponseEntity.noContent().cacheControl(CacheControl.noStore())
-                .header(HttpHeaders.SET_COOKIE, IdentityHttp.cookie(IdentityHttp.STAFF, "", Duration.ZERO)).build();
-    }
-
     @PostMapping(value = "/members", consumes = MediaType.APPLICATION_JSON_VALUE)
     ResponseEntity<MemberCreated> createMember(@Valid @RequestBody Member input, HttpServletRequest request) {
         IdentityHttp.requireOrigin(request, settings.publicOrigin());
-        String token = IdentityHttp.token(request, IdentityHttp.STAFF);
-        IdentityHttp.requireCsrf(request, token);
-        String id = staff.createMember(token, input.departmentCode(), input.email(), input.password(), input.role(), input.displayName());
+        String id = staff.createMember(sid(request), input.departmentCode(), input.email(), input.password(), input.role(), input.displayName());
         return ResponseEntity.status(201).cacheControl(CacheControl.noStore()).body(new MemberCreated(id));
+    }
+
+    private String sid(HttpServletRequest request) {
+        return tokens.access(request.getHeader(HttpHeaders.AUTHORIZATION), ChatIdentity.Side.STAFF).subject().sid();
     }
 
     record Login(@NotBlank @Pattern(regexp = TENANT_CODE) String tenantCode,

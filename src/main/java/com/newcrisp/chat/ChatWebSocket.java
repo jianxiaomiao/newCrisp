@@ -4,14 +4,18 @@ import static com.newcrisp.chat.ChatModels.*;
 
 import com.newcrisp.identity.ChatIdentity;
 import com.newcrisp.identity.ChatIdentity.Actor;
-import com.newcrisp.identity.ChatIdentity.Credential;
+import com.newcrisp.identity.ChatIdentity.Side;
+import com.newcrisp.identity.ChatIdentity.SocketAccess;
 import com.newcrisp.identity.IdentityError;
 import java.io.IOException;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
@@ -28,10 +32,10 @@ import tools.jackson.databind.ObjectMapper;
 
 @Component
 class ChatWebSocket extends TextWebSocketHandler {
-    static final String CREDENTIAL = ChatWebSocket.class.getName() + ".credential";
-    static final String ACTOR = ChatWebSocket.class.getName() + ".actor";
+    static final String SIDE = ChatWebSocket.class.getName() + ".side";
     private static final Logger log = LoggerFactory.getLogger(ChatWebSocket.class);
     private final ConcurrentMap<String, Peer> peers = new ConcurrentHashMap<>();
+    private final Semaphore awaitingAuth = new Semaphore(128);
     private final ChatIdentity identity;
     private final ChatService chat;
     private final ChatStore store;
@@ -49,14 +53,15 @@ class ChatWebSocket extends TextWebSocketHandler {
     }
 
     @Override
-    public void afterConnectionEstablished(WebSocketSession session) {
+    public void afterConnectionEstablished(WebSocketSession session) throws IOException {
+        if (!awaitingAuth.tryAcquire()) {
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
         session.setTextMessageSizeLimit(32 * 1024);
         Peer peer = new Peer(new ConcurrentWebSocketSessionDecorator(session, 2_000, 64 * 1024),
-                (Credential) session.getAttributes().get(CREDENTIAL), (Actor) session.getAttributes().get(ACTOR));
+                (Side) session.getAttributes().get(SIDE), clock.instant().plusSeconds(5));
         peers.put(session.getId(), peer);
-        presence.confirm(session.getId(), peer.actor, peer.sessionMarker);
-        send(peer, new ServerFrame("ready", null, peer.actor.id()));
-        ping(peer);
     }
 
     @Override
@@ -67,10 +72,14 @@ class ChatWebSocket extends TextWebSocketHandler {
         try {
             ClientFrame frame = json.readValue(message.getPayload(), ClientFrame.class);
             if (frame == null || frame.type() == null) throw invalid("INVALID_FRAME");
+            if (peer.actor == null) {
+                authenticate(peer, frame);
+                return;
+            }
             if ("pong".equals(frame.type())) {
                 Actor actor = refresh(peer);
                 if (peer.confirm(frame.nonce()) && peers.get(session.getId()) == peer) {
-                    presence.confirm(session.getId(), actor, peer.sessionMarker);
+                    presence.confirm(session.getId(), actor, peer.access.sid());
                 }
                 return;
             }
@@ -88,26 +97,55 @@ class ChatWebSocket extends TextWebSocketHandler {
             send(peer, new ServerFrame("message.ack", requestId, saved));
         } catch (IdentityError error) {
             send(peer, new ServerFrame("error", requestId, new Failure(error.code, error.status.value())));
-            if (error.status == HttpStatus.UNAUTHORIZED) drop(peer, true);
+            if (error.status == HttpStatus.UNAUTHORIZED || peer.actor == null) drop(peer, true);
         } catch (JacksonException invalidJson) {
             send(peer, new ServerFrame("error", requestId, new Failure("INVALID_FRAME", 400)));
+            if (peer.actor == null) drop(peer, true);
         } catch (RuntimeException error) {
-            log.warn("Chat WebSocket command failed for tenant {}", peer.actor.tenantId());
+            log.warn("Chat WebSocket command failed");
             send(peer, new ServerFrame("error", requestId, new Failure("SEND_RESULT_UNKNOWN", 503)));
+            if (peer.actor == null) drop(peer, false);
         }
     }
 
+    private void authenticate(Peer peer, ClientFrame frame) {
+        if (!"auth".equals(frame.type()) || !clock.instant().isBefore(peer.authBy)) throw IdentityError.unauthorized();
+        peer.access = identity.redeemSocket(peer.side, frame.ticket());
+        Actor actor = identity.authenticate(peer.access);
+        if (!clock.instant().isBefore(peer.authBy) || peers.get(peer.socket.getId()) != peer) throw IdentityError.unauthorized();
+        peer.actor = actor;
+        releaseAuthSlot(peer);
+        presence.confirm(peer.socket.getId(), actor, peer.access.sid());
+        if (peers.get(peer.socket.getId()) != peer) {
+            presence.forget(peer.socket.getId());
+            return;
+        }
+        send(peer, new ServerFrame("ready", null, actor.id()));
+        ping(peer);
+    }
+
     private Actor refresh(Peer peer) {
-        Actor current = identity.authenticate(peer.credential);
+        Actor current = identity.authenticate(peer.access);
         if (!current.id().equals(peer.actor.id()) || current.tenantId() != peer.actor.tenantId()) throw IdentityError.unauthorized();
         peer.actor = current;
         return current;
+    }
+
+    @Scheduled(fixedDelay = 1_000)
+    void expireConnections() {
+        Instant now = clock.instant();
+        for (Peer peer : peers.values()) {
+            if (peer.actor == null ? !now.isBefore(peer.authBy) : !now.isBefore(peer.access.expiresAt())) {
+                drop(peer, true);
+            }
+        }
     }
 
     @Scheduled(fixedDelayString = "${newcrisp.chat.heartbeat-ms:15000}")
     void heartbeat() {
         presence.forgetExpired();
         for (Peer peer : peers.values()) {
+            if (peer.actor == null) continue;
             if (peer.timedOut()) {
                 drop(peer, false);
                 continue;
@@ -145,6 +183,7 @@ class ChatWebSocket extends TextWebSocketHandler {
         IdentityError unavailable = null;
         for (Peer peer : peers.values()) {
             var initial = peer.actor;
+            if (initial == null) continue;
             if (initial.tenantId() != chatRow.tenantId() || (initial.customer() && !initial.id().equals(chatRow.customerId()))) continue;
             if (!initial.customer() && !initial.agentDepartments().contains(chatRow.departmentId())
                     && !initial.supervisorDepartments().contains(chatRow.departmentId())) continue;
@@ -171,9 +210,10 @@ class ChatWebSocket extends TextWebSocketHandler {
     @EventListener
     void signedOut(ChatIdentity.SessionEnded event) {
         for (Peer peer : peers.values()) {
-            if (peer.credential.equals(event.credential())) drop(peer, true);
+            var access = peer.access;
+            if (access != null && access.side() == event.side() && access.sid().equals(event.sid())) drop(peer, true);
         }
-        presence.revoke(event.credential().sessionMarker());
+        presence.revoke(event.sid());
     }
 
     private void send(Peer peer, ServerFrame frame) {
@@ -186,7 +226,8 @@ class ChatWebSocket extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        peers.remove(session.getId());
+        Peer peer = peers.remove(session.getId());
+        if (peer != null) releaseAuthSlot(peer);
     }
 
     @Override
@@ -197,29 +238,35 @@ class ChatWebSocket extends TextWebSocketHandler {
 
     private void drop(Peer peer, boolean revoked) {
         peers.remove(peer.socket.getId(), peer);
+        releaseAuthSlot(peer);
         if (revoked) presence.forget(peer.socket.getId());
         try { peer.socket.close(revoked ? CloseStatus.POLICY_VIOLATION : CloseStatus.GOING_AWAY); }
         catch (IOException ignored) { /* transport is already gone */ }
     }
 
+    private void releaseAuthSlot(Peer peer) {
+        if (peer.pending.compareAndSet(true, false)) awaitingAuth.release();
+    }
+
     private record ClientFrame(String type, String requestId, String conversationId, String clientMessageId,
-                               String text, String stateVersion, String nonce) {}
+                               String text, String stateVersion, String nonce, String ticket) {}
     private record ServerFrame(String type, String requestId, Object data) {}
     private record Failure(String code, int status) {}
 
     private static final class Peer {
         final WebSocketSession socket;
-        final Credential credential;
-        final String sessionMarker;
+        final Side side;
+        final Instant authBy;
+        final AtomicBoolean pending = new AtomicBoolean(true);
+        volatile SocketAccess access;
         volatile Actor actor;
         private String nonce;
         private int missedHeartbeats;
 
-        Peer(WebSocketSession socket, Credential credential, Actor actor) {
+        Peer(WebSocketSession socket, Side side, Instant authBy) {
             this.socket = socket;
-            this.credential = credential;
-            this.sessionMarker = credential.sessionMarker();
-            this.actor = actor;
+            this.side = side;
+            this.authBy = authBy;
         }
 
         synchronized String challenge() {

@@ -36,9 +36,10 @@ class ChatSocketConfiguration implements WebSocketConfigurer {
                                                    Map<String, Object> attributes) {
                         try {
                             Side side = request.getURI().getPath().endsWith("/customer") ? Side.CUSTOMER : Side.STAFF;
-                            var credential = identity.credential(((ServletServerHttpRequest) request).getServletRequest(), side, false, true);
-                            attributes.put(ChatWebSocket.ACTOR, identity.authenticate(credential));
-                            attributes.put(ChatWebSocket.CREDENTIAL, credential);
+                            var servlet = ((ServletServerHttpRequest) request).getServletRequest();
+                            identity.requireBrowserOrigin(servlet);
+                            if (servlet.getQueryString() != null) throw IdentityError.unauthorized();
+                            attributes.put(ChatWebSocket.SIDE, side);
                             return true;
                         } catch (IdentityError error) {
                             response.setStatusCode(error.status);

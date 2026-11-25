@@ -90,7 +90,7 @@ class ChatController {
     }
 
     private Actor actor(HttpServletRequest request, String side, boolean write) {
-        var actor = identity.authenticate(identity.credential(request, "customer".equals(side) ? Side.CUSTOMER : Side.STAFF, write, false));
+        var actor = identity.authenticate(request, Side.fromPath(side), write);
         String expected = request.getHeader("X-NewCrisp-Actor");
         if (expected != null && !expected.equals(actor.id())) throw IdentityError.unauthorized();
         return actor;

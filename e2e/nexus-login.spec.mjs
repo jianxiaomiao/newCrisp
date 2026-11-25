@@ -126,7 +126,7 @@ test.describe('Nexus login against isolated MySQL', () => {
         staff(first, firstAgent, password), staff(first, secondAgent, password),
         staff(first, supervisor, password), staff(second, otherAgent, password),
       ]);
-      const starts = [];
+      const starts = [], usedTickets = new Set();
       let dropAck = true, offline = false, route;
       await page.routeWebSocket('**/ws/customer', (client) => {
         route = client;
@@ -135,6 +135,7 @@ test.describe('Nexus login against isolated MySQL', () => {
         client.onMessage((body) => {
           const frame = JSON.parse(body.toString());
           if (frame.type === 'conversation.start') starts.push(frame.clientMessageId);
+          if (frame.type === 'auth') usedTickets.add(frame.ticket);
           server.send(body);
         });
         server.onMessage((body) => {
@@ -194,6 +195,7 @@ test.describe('Nexus login against isolated MySQL', () => {
       offline = false;
       await page.context().setOffline(false);
       await expect(page.getByRole('list', { name: '消息' }).getByText(reply)).toHaveCount(1, { timeout: 15_000 });
+      expect(usedTickets.size).toBeGreaterThanOrEqual(3);
 
       const original = (await browserApi(winner, path)).data;
       expect((await write(manager, `${path}/return`, { actionId: randomUUID(), stateVersion: original.stateVersion })).status).toBe(200);
@@ -244,13 +246,7 @@ async function createMember(page, email, password, role) {
 }
 
 function write(page, path, body, method = 'POST') {
-  return page.evaluate(async ({ path, body, method }) => {
-    const current = await fetch('/api/v1/staff/me');
-    const response = await fetch(path, { method, body: JSON.stringify(body), headers: {
-      'Content-Type': 'application/json', 'X-NewCrisp-CSRF': current.headers.get('X-NewCrisp-CSRF'),
-    } });
-    return { status: response.status, authenticated: current.status, data: await response.json().catch(() => null) };
-  }, { path, body, method });
+  return browserApi(page, path, { method, body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
 }
 
 async function pollQueue(page) {
@@ -263,12 +259,18 @@ async function pollQueue(page) {
 }
 
 function socketReply(page, payload) {
-  return page.evaluate((message) => new Promise((resolve, reject) => {
+  return page.evaluate(async (message) => {
+    const auth = (await import('/web-session.js')).webSession('staff');
+    const response = await auth.request('/api/v1/staff/ws-ticket', { method: 'POST' });
+    if (!response.ok) throw new Error(`Socket ticket returned ${response.status}`);
+    const { ticket } = await response.json();
+    return new Promise((resolve, reject) => {
     const url = new URL('/ws/staff', location.href);
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const connection = new WebSocket(url);
     const requestId = crypto.randomUUID();
     const timer = setTimeout(() => { connection.close(); reject(new Error('Socket command timed out')); }, 5_000);
+    connection.onopen = () => connection.send(JSON.stringify({ type: 'auth', ticket }));
     connection.onmessage = (event) => {
       const row = JSON.parse(event.data);
       if (row.type === 'ready') connection.send(JSON.stringify({ ...message, requestId, clientMessageId: crypto.randomUUID() }));
@@ -278,5 +280,6 @@ function socketReply(page, payload) {
       connection.close();
       resolve(row);
     };
-  }), payload);
+    });
+  }, payload);
 }

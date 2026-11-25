@@ -3,6 +3,7 @@ package com.newcrisp.identity;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -19,14 +20,16 @@ class NexusLaunchService {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final IdentityConfiguration.Settings settings;
+    private final WebTokens tokens;
 
     NexusLaunchService(NexusStore store, NexusSessionVerifier verifier, TransactionTemplate transactions, Clock clock,
-                       IdentityConfiguration.Settings settings) {
+                       IdentityConfiguration.Settings settings, WebTokens tokens) {
         this.store = store;
         this.verifier = verifier;
         this.transactions = transactions;
         this.clock = clock;
         this.settings = settings;
+        this.tokens = tokens;
     }
 
     @Transactional
@@ -60,7 +63,7 @@ class NexusLaunchService {
         return grant;
     }
 
-    String redeem(String token, String origin) {
+    WebTokens.Issued redeem(String token, String origin) {
         if (!IdentityTokens.valid(token)) throw IdentityError.invalidGrant();
         byte[] hash = IdentityTokens.digest(token);
         var grant = store.availableGrant(hash, now()).orElseThrow(IdentityError::invalidGrant);
@@ -71,34 +74,30 @@ class NexusLaunchService {
         return transactions.execute(status -> {
             LocalDateTime redeemedAt = now();
             if (!store.consumeGrant(hash, origin, redeemedAt)) throw IdentityError.invalidGrant();
-            String session = IdentityTokens.generate();
-            store.createSession(IdentityTokens.digest(session), grant, redeemedAt.plus(SESSION_TTL),
+            String sid = UUID.randomUUID().toString();
+            var expires = redeemedAt.plus(SESSION_TTL);
+            String customer = store.createSession(sid, grant, expires,
                     checkedAt.plus(settings.nexusVerificationTtl()));
-            return session;
+            return tokens.initial(new AccessJwt.Subject(ChatIdentity.Side.CUSTOMER, grant.tenantId(), customer, sid),
+                    expires.toInstant(ZoneOffset.UTC), true);
         });
     }
 
-    NexusStore.CustomerProfile profile(String token) {
-        return requireSession(token).profile();
+    NexusStore.CustomerProfile profile(String sid) {
+        return requireSession(sid).profile();
     }
 
-    NexusStore.CustomerSession requireSession(String token) {
-        if (!IdentityTokens.valid(token)) throw IdentityError.unauthorized();
-        byte[] hash = IdentityTokens.digest(token);
+    NexusStore.CustomerSession requireSession(String sid) {
         LocalDateTime checkedAt = now();
-        var session = store.session(hash, checkedAt).orElseThrow(IdentityError::unauthorized);
+        var session = store.session(sid, checkedAt).orElseThrow(IdentityError::unauthorized);
         if (checkedAt.isBefore(session.verifiedUntil())) return session;
         if (!verifier.active(session.userId(), session.sessionId())) {
-            store.deleteSession(hash);
+            tokens.revoke(ChatIdentity.Side.CUSTOMER, sid);
             throw IdentityError.unauthorized();
         }
-        store.verified(hash, checkedAt.plus(settings.nexusVerificationTtl()));
+        store.verified(sid, checkedAt.plus(settings.nexusVerificationTtl()));
         // A local logout or integration disable during the upstream request invalidates the result.
-        return store.session(hash, now()).orElseThrow(IdentityError::unauthorized);
-    }
-
-    void logout(String token) {
-        if (IdentityTokens.valid(token)) store.deleteSession(IdentityTokens.digest(token));
+        return store.session(sid, now()).orElseThrow(IdentityError::unauthorized);
     }
 
     private LocalDateTime now() { return LocalDateTime.now(clock); }

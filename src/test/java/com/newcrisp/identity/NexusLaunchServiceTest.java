@@ -33,12 +33,13 @@ class NexusLaunchServiceTest {
     @Mock NexusStore store;
     @Mock NexusSessionVerifier verifier;
     @Mock PlatformTransactionManager transactionManager;
+    @Mock WebTokens tokens;
     NexusLaunchService service;
 
     @BeforeEach
     void setUp() {
         var settings = new IdentityConfiguration.Settings("https://chat.example.test", "", "", "", Duration.ofSeconds(60));
-        service = new NexusLaunchService(store, verifier, new TransactionTemplate(transactionManager), CLOCK, settings);
+        service = new NexusLaunchService(store, verifier, new TransactionTemplate(transactionManager), CLOCK, settings, tokens);
     }
 
     @Test
@@ -101,10 +102,10 @@ class NexusLaunchServiceTest {
     @Test
     void expiredVerificationRevokesCustomerSessionIfNexusNoLongerRecognizesIt() {
         var profile = new NexusStore.CustomerProfile("customer-a", "tenant-a", "第一租户");
-        when(store.session(aryEq(hash), eq(NOW))).thenReturn(Optional.of(new NexusStore.CustomerSession(profile, 7, 11, NOW, 17, "support")));
+        when(store.session(token, NOW)).thenReturn(Optional.of(new NexusStore.CustomerSession(profile, 7, 11, NOW, 17, "support")));
         when(verifier.active(7, 11)).thenReturn(false);
 
         assertThatThrownBy(() -> service.profile(token)).hasMessage("SESSION_REQUIRED");
-        verify(store).deleteSession(aryEq(hash));
+        verify(tokens).revoke(ChatIdentity.Side.CUSTOMER, token);
     }
 }

@@ -1,4 +1,5 @@
 import { mountChat } from './chat.js';
+import { webSession } from './web-session.js';
 
 const login = document.querySelector('#login');
 const profile = document.querySelector('#profile');
@@ -7,15 +8,14 @@ const feedback = document.querySelector('#feedback');
 const logout = document.querySelector('#logout');
 const submit = login.querySelector('button');
 const endpoint = '/api/v1/staff';
-let csrf;
+const auth = webSession('staff');
 const member = document.querySelector('#member');
 let chatIdentity;
 let stopChat;
 
 async function refreshProfile() {
-  const response = await fetch(`${endpoint}/me`, { cache: 'no-store' });
+  const response = await auth.request(`${endpoint}/me`);
   if (response.status === 401) {
-    csrf = undefined;
     stopChat?.();
     stopChat = undefined;
     chatIdentity = undefined;
@@ -27,18 +27,18 @@ async function refreshProfile() {
   }
   if (!response.ok) throw new Error('profile unavailable');
   const user = await response.json();
-  csrf = response.headers.get('X-NewCrisp-CSRF');
   document.querySelector('#workspace').textContent = user.tenantName;
   document.querySelector('#email').textContent = user.email;
   heading.textContent = user.role === 'TENANT_ADMIN' ? '租户管理' : '客服工作台';
   login.hidden = true;
   profile.hidden = false;
   member.hidden = user.role !== 'TENANT_ADMIN';
-  if (chatIdentity !== user.staffId) {
+  const sid = auth.currentId();
+  if (chatIdentity !== sid) {
     stopChat?.();
-    chatIdentity = user.staffId;
+    chatIdentity = sid;
     stopChat = mountChat(document.querySelector('#chat'), {
-      side: 'staff', identity: user.staffId, csrf: () => csrf, canQueue: user.canQueue, canSupervise: user.canSupervise,
+      side: 'staff', identity: user.staffId, auth, sid, canQueue: user.canQueue, canSupervise: user.canSupervise,
       expired: () => { chatIdentity = undefined; refreshProfile().catch(() => { feedback.textContent = '请重新登录。'; }); },
     });
   }
@@ -49,20 +49,11 @@ login.addEventListener('submit', async (event) => {
   submit.disabled = true;
   feedback.textContent = '';
   try {
-    const response = await fetch(`${endpoint}/session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.fromEntries(new FormData(login))),
-    });
-    if (response.status === 401) {
-      feedback.textContent = '租户代码、邮箱或密码有误。';
-      return;
-    }
-    if (!response.ok) throw new Error('login unavailable');
+    await auth.login(Object.fromEntries(new FormData(login)));
     login.reset();
     await refreshProfile();
-  } catch {
-    feedback.textContent = '暂时无法确认登录，请刷新页面后重试。';
+  } catch (error) {
+    feedback.textContent = error.status === 401 ? '租户代码、邮箱或密码有误。' : '暂时无法确认登录，请刷新页面后重试。';
   } finally {
     submit.disabled = false;
   }
@@ -72,8 +63,7 @@ logout.addEventListener('click', async () => {
   logout.disabled = true;
   feedback.textContent = '';
   try {
-    const response = await fetch(`${endpoint}/session`, { method: 'DELETE', headers: { 'X-NewCrisp-CSRF': csrf } });
-    if (!response.ok) throw new Error('logout unavailable');
+    await auth.logout();
     await refreshProfile();
   } catch {
     feedback.textContent = '退出未确认，请重试。';
@@ -83,16 +73,21 @@ logout.addEventListener('click', async () => {
 });
 
 refreshProfile().catch(() => { feedback.textContent = '暂时无法加载登录状态，请刷新页面。'; });
+auth.onChange(() => {
+  stopChat?.();
+  chatIdentity = undefined;
+  refreshProfile().catch(() => { feedback.textContent = '请重新登录。'; });
+});
 
 member.addEventListener('submit', async (event) => {
   event.preventDefault();
   const submitMember = member.querySelector('button');
   submitMember.disabled = true;
   try {
-    const response = await fetch(`${endpoint}/members`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-NewCrisp-CSRF': csrf },
+    const response = await auth.request(`${endpoint}/members`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(Object.fromEntries(new FormData(member))),
-    });
+    }, chatIdentity);
     if (!response.ok) throw new Error('member unavailable');
     member.reset();
     feedback.textContent = '成员已创建。';

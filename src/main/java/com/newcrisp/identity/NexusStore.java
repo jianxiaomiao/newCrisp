@@ -64,7 +64,7 @@ class NexusStore {
                 """).params(now, hash, now, origin).update() == 1;
     }
 
-    void createSession(byte[] hash, Grant grant, LocalDateTime expiresAt, LocalDateTime verifiedUntil) {
+    String createSession(String sid, Grant grant, LocalDateTime expiresAt, LocalDateTime verifiedUntil) {
         jdbc.sql("""
                 INSERT INTO customer (tenant_id, id, integration_id, external_user_id) VALUES (?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE external_user_id = customer.external_user_id
@@ -73,33 +73,31 @@ class NexusStore {
                 SELECT id FROM customer WHERE tenant_id = ? AND integration_id = ? AND external_user_id = ?
                 """).params(grant.tenantId(), grant.integrationId(), grant.userId()).query(String.class).single();
         jdbc.sql("""
-                INSERT INTO customer_session (token_hash, tenant_id, customer_id, external_session_id, expires_at, verified_until)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """).params(hash, grant.tenantId(), customerId, grant.sessionId(), expiresAt, verifiedUntil).update();
+                INSERT INTO customer_session (token_hash, sid, tenant_id, customer_id, external_session_id, expires_at, verified_until)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """).params(IdentityTokens.digest("session:" + sid), sid, grant.tenantId(), customerId,
+                grant.sessionId(), expiresAt, verifiedUntil).update();
+        return customerId;
     }
 
-    Optional<CustomerSession> session(byte[] hash, LocalDateTime now) {
+    Optional<CustomerSession> session(String sid, LocalDateTime now) {
         return jdbc.sql("""
                 SELECT c.id, c.external_user_id, s.external_session_id, s.verified_until, t.code, t.name,
                     c.tenant_id, i.department_id
                 FROM customer_session s JOIN customer c ON c.tenant_id = s.tenant_id AND c.id = s.customer_id
                 JOIN integration i ON i.tenant_id = c.tenant_id AND i.id = c.integration_id
                 JOIN tenant t ON t.id = c.tenant_id
-                WHERE s.token_hash = ? AND s.expires_at > ? AND i.enabled AND t.status = 'ACTIVE'
-                """).params(hash, now).query((rs, row) -> new CustomerSession(
+                WHERE s.sid = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND i.enabled AND t.status = 'ACTIVE'
+                """).params(sid, now).query((rs, row) -> new CustomerSession(
                 new CustomerProfile(rs.getString("id"), rs.getString("code"), rs.getString("name")),
                 rs.getLong("external_user_id"), rs.getLong("external_session_id"),
                 rs.getObject("verified_until", LocalDateTime.class), rs.getLong("tenant_id"),
                 rs.getString("department_id"))).optional();
     }
 
-    void verified(byte[] hash, LocalDateTime until) {
-        jdbc.sql("UPDATE customer_session SET verified_until = GREATEST(verified_until, ?) WHERE token_hash = ?")
-                .params(until, hash).update();
-    }
-
-    void deleteSession(byte[] hash) {
-        jdbc.sql("DELETE FROM customer_session WHERE token_hash = ?").param(hash).update();
+    void verified(String sid, LocalDateTime until) {
+        jdbc.sql("UPDATE customer_session SET verified_until = GREATEST(verified_until, ?) WHERE sid = ? AND revoked_at IS NULL")
+                .params(until, sid).update();
     }
 
     record IntegrationKey(long tenantId, String integrationId, byte[] secretHash) {}
