@@ -114,9 +114,15 @@ if (resume) void start();
 <template>
   <main class="guest-shell surface">
     <header class="guest-heading">
-      <el-avatar :size="42"><el-icon><Headset /></el-icon></el-avatar>
-      <div><h1>{{ visitor?.tenantName ?? '访客客服' }}</h1><p>网站访客</p></div>
+      <el-avatar :size="40"><el-icon><Headset /></el-icon></el-avatar>
+      <div class="guest-heading-copy"><h1>{{ visitor?.tenantName ?? '访客客服' }}</h1><p>网站访客</p></div>
+      <el-button v-if="visitor" class="guest-code-toggle" link :icon="Connection" :aria-expanded="showCode" @click="showCode = !showCode">
+        {{ showCode ? '隐藏接续码' : '显示访客接续码' }}
+      </el-button>
     </header>
+    <div v-if="visitor && showCode" class="guest-code-drawer">
+      <label class="guest-code">访客接续码<el-input readonly size="small" aria-label="访客接续码" :model-value="`${site}.${resume}`" /></label>
+    </div>
     <p v-if="error" class="feedback guest-feedback" aria-live="polite">{{ error }}</p>
     <div v-if="!visitor" class="guest-welcome">
       <div class="inline-actions">
@@ -133,11 +139,6 @@ if (resume) void start();
         </form>
       </details>
     </div>
-    <ChatPanel v-else :key="visitor.token.sessionId" side="customer" :identity="visitor.customerId" :sid="visitor.token.sessionId" :auth="auth" guest @expired="expired">
-      <template #sidebar>
-        <el-button link type="primary" :icon="Connection" :aria-expanded="showCode" @click="showCode = !showCode">{{ showCode ? '隐藏接续码' : '显示访客接续码' }}</el-button>
-        <label v-if="showCode" class="guest-code">访客接续码<el-input readonly aria-label="访客接续码" :model-value="`${site}.${resume}`" /></label>
-      </template>
-    </ChatPanel>
+    <ChatPanel v-else :key="visitor.token.sessionId" side="customer" :identity="visitor.customerId" :sid="visitor.token.sessionId" :auth="auth" guest @expired="expired" />
   </main>
 </template>

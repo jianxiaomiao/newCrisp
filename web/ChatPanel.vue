@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
-import { Bell, ChatDotRound, CircleCheck, Document, Headset, MuteNotification, Paperclip, Promotion, Search, User } from '@element-plus/icons-vue';
+import { ArrowLeft, Bell, ChatDotRound, CircleCheck, Document, Headset, MuteNotification, Paperclip, Promotion, Search, User } from '@element-plus/icons-vue';
 import { responseError } from './api';
 import { confirmAction } from './confirmation';
 import { SessionError, type SessionSide } from './web-session';
@@ -62,12 +62,17 @@ type Frame =
   | { type: 'message.ack'; requestId: string; data: Ack }
   | { type: 'error'; requestId: string | null; data: { status: number; code: string } };
 
-const { side, identity, auth, sid, accessVersion, canQueue, canSupervise, guest } = defineProps<{
+const { side, identity, auth, sid, accessVersion, canQueue, canSupervise, guest, embedded } = defineProps<{
   side: SessionSide; identity: string; auth: { request: (path: string, options?: RequestInit, expectedSid?: string) => Promise<Response> }; sid: string;
-  accessVersion?: string; canQueue?: boolean; canSupervise?: boolean; guest?: boolean;
+  accessVersion?: string; canQueue?: boolean; canSupervise?: boolean; guest?: boolean; embedded?: boolean;
 }>();
 const emit = defineEmits<{ expired: [] }>();
 const customer = side === 'customer';
+const compact = computed(() => customer && Boolean(guest || embedded));
+const compactPage = ref<'thread' | 'list'>('thread');
+const compactRows = shallowRef<ListItem[]>([]);
+const compactHistoryCursor = ref<string | null>(null);
+const compactLoading = ref(false);
 const views: [View, string][] = customer ? [['CURRENT', '当前会话'], ['HISTORY', '历史会话']] : [];
 if (canQueue) views.push(['PENDING', '待领取'], ['MINE', '我负责'], ['CLOSED', '已结束']);
 if (canSupervise) views.push(['DEPARTMENT', '部门会话']);
@@ -549,7 +554,53 @@ function changeView(nextView: View, preserveDraft = false) {
 
 function openConversation(id: string) {
   select(id);
+  if (compact.value) compactPage.value = 'thread';
   void sync();
+}
+
+async function openCompactList() {
+  compactPage.value = 'list';
+  compactLoading.value = true;
+  try {
+    const [currentPage, historyPage] = await Promise.all([
+      api<ConversationPage>('/conversations?view=CURRENT'),
+      api<ConversationPage>('/conversations?view=HISTORY'),
+    ]);
+    if (closed) return;
+    const merged = new Map<string, ListItem>();
+    for (const item of [...currentPage.items, ...historyPage.items]) {
+      merged.set(item.id, item);
+    }
+    compactRows.value = [...merged.values()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+    compactHistoryCursor.value = historyPage.nextCursor;
+  } catch (error) { showError(error); }
+  finally { compactLoading.value = false; }
+}
+
+async function loadMoreCompactHistory() {
+  const previous = compactHistoryCursor.value;
+  if (!previous) return;
+  try {
+    const page = await api<ConversationPage>(`/conversations?view=HISTORY&cursor=${encodeURIComponent(previous)}`);
+    if (closed || compactHistoryCursor.value !== previous) return;
+    const known = new Set(compactRows.value.map((r) => r.id));
+    compactRows.value = compactRows.value
+      .concat(page.items.filter((r) => !known.has(r.id)))
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+    compactHistoryCursor.value = page.nextCursor;
+  } catch (error) { showError(error); }
+}
+
+function openCompactRow(row: ListItem) {
+  view.value = row.status === 'CLOSED' ? 'HISTORY' : 'CURRENT';
+  select(row.id);
+  compactPage.value = 'thread';
+  void sync();
+}
+
+function startNewCompactConversation() {
+  changeView('CURRENT', true);
+  compactPage.value = 'thread';
 }
 
 function merge(collection: ChatMessage[], preserveScroll = false) {
@@ -961,7 +1012,7 @@ onUnmounted(dispose);
 </script>
 
 <template>
-  <section id="chat" :class="['chat-panel', { 'customer-panel': customer, 'embedded-panel': guest }]" :aria-label="customer ? '在线对话' : '客服工作台'">
+  <section id="chat" :class="['chat-panel', { 'customer-panel': customer, 'embedded-panel': compact }]" :aria-label="customer ? '在线对话' : '客服工作台'">
     <div v-if="!customer" class="workbar">
       <span v-if="canQueue && accepting !== undefined" class="presence"><span :class="['dot', { paused: !accepting }]"></span>{{ accepting ? '接单中' : '已暂停接单' }}</span>
       <el-button v-if="canQueue && accepting !== undefined" :disabled="updatingAvailability"
@@ -982,8 +1033,16 @@ onUnmounted(dispose);
     </div>
 
     <div :class="['chat-layout', { 'queue-layout': queue, 'with-team': showTeam }]">
-      <section class="surface conversation-panel" aria-label="会话">
-        <div class="conversation-tools">
+      <section v-if="!compact || compactPage === 'list'" class="surface conversation-panel" aria-label="会话">
+        <div v-if="compact" class="compact-list-header">
+          <div>
+            <h2>全部会话</h2>
+            <p v-if="summary" class="chat-summary" aria-live="polite">{{ summary }}</p>
+          </div>
+          <el-button v-if="!compactRows.some((r) => r.status !== 'CLOSED')" type="primary" size="small" @click="startNewCompactConversation">发起新会话</el-button>
+          <el-button v-else size="small" plain @click="compactPage = 'thread'">返回当前对话</el-button>
+        </div>
+        <div v-else class="conversation-tools">
           <h2>{{ queue ? '待领取队列' : customer ? '我的会话' : '会话' }}</h2>
           <nav class="chat-tabs" aria-label="会话列表">
             <el-button v-for="[value, title] in views" :key="value" size="small" :aria-pressed="view === value" @click="changeView(value)">{{ title }}</el-button>
@@ -995,7 +1054,27 @@ onUnmounted(dispose);
           </div>
           <p class="chat-summary" aria-live="polite">{{ summary }}</p>
         </div>
-        <el-table v-if="queue" :data="rows" class="data-table queue-table" empty-text="暂无待领取会话">
+        <template v-if="compact">
+          <ul class="chat-list" aria-label="会话">
+            <li v-for="row in compactRows" :key="row.id">
+              <button type="button" class="conversation-row" :aria-pressed="selection === row.id" @click="openCompactRow(row)">
+                <span class="conversation-copy">
+                  <strong>{{ row.preview || labels[row.status] }}</strong>
+                  <small>
+                    <el-tag size="small" round :class="row.status === 'ACTIVE' ? 'tag-success' : row.status === 'WAITING' ? 'tag-warning' : 'tag-neutral'">{{ labels[row.status] }}</el-tag>
+                  </small>
+                </span>
+                <span class="conversation-meta">
+                  <time :datetime="row.timestamp">{{ dayTime.format(new Date(row.timestamp)) }}</time>
+                  <span v-if="row.unread" class="unread" :aria-label="`${row.unread} 条未读`">{{ row.unread }}</span>
+                </span>
+              </button>
+            </li>
+          </ul>
+          <p v-if="!compactRows.length" class="list-empty">{{ compactLoading ? '正在加载会话…' : '暂无会话记录' }}</p>
+          <el-button v-if="compactHistoryCursor" class="chat-next" link type="primary" @click="loadMoreCompactHistory">加载更多历史会话</el-button>
+        </template>
+        <el-table v-else-if="queue" :data="rows" class="data-table queue-table" empty-text="暂无待领取会话">
           <el-table-column label="最新消息" min-width="190">
             <template #default="{ row }"><strong class="queue-preview">{{ row.preview || labels[(row as ListItem).status] }}</strong></template>
           </el-table-column>
@@ -1034,13 +1113,14 @@ onUnmounted(dispose);
           </ul>
           <p v-if="!filteredRows.length" class="list-empty">{{ filter ? '没有匹配的会话' : '暂无会话' }}</p>
         </template>
-        <el-button v-if="cursor" class="chat-next" link type="primary" @click="loadMoreConversations">更多会话</el-button>
+        <el-button v-if="!compact && cursor" class="chat-next" link type="primary" @click="loadMoreConversations">更多会话</el-button>
         <div v-if="$slots.sidebar" class="conversation-footer"><slot name="sidebar" /></div>
       </section>
 
-      <section v-if="!queue" :class="['surface', 'thread', { dragging }]" aria-label="对话详情"
+      <section v-if="!queue && (!compact || compactPage === 'thread')" :class="['surface', 'thread', { dragging }]" aria-label="对话详情"
         @dragover.prevent="dragging = canReply" @dragleave.self="dragging = false" @drop.prevent="onDrop">
         <header class="thread-header">
+          <el-button v-if="compact" class="compact-back-btn" text circle :icon="ArrowLeft" aria-label="历史会话" title="查看会话列表" @click="openCompactList" />
           <el-avatar :size="42" :src="!customer ? (detail?.customer?.avatarUrl || undefined) : undefined">
             <template v-if="!customer && detail?.customer?.displayName">{{ detail.customer.displayName.charAt(0).toUpperCase() }}</template>
             <el-icon v-else><component :is="customer ? Headset : User" /></el-icon>
@@ -1059,7 +1139,7 @@ onUnmounted(dispose);
             <el-button v-if="detail?.canReturn" @click="perform('return', detail)">退回队列</el-button>
             <el-button v-if="detail?.canTransfer && !transfer" type="primary" plain @click="openTransfer(detail)">转派会话</el-button>
             <el-button v-if="detail?.canClose" :icon="CircleCheck" class="end-thread" @click="perform('close', detail)">结束会话</el-button>
-            <el-button v-if="customer && detail?.status === 'CLOSED'" type="primary" @click="changeView('CURRENT', true)">发起新会话</el-button>
+            <el-button v-if="customer && detail?.status === 'CLOSED'" type="primary" @click="compact ? startNewCompactConversation() : changeView('CURRENT', true)">发起新会话</el-button>
           </div>
         </header>
         <form v-if="transfer && detail?.canTransfer" class="chat-transfer field-stack" @submit.prevent="submitTransfer">

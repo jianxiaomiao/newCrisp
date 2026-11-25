@@ -200,7 +200,7 @@ onUnmounted(() => {
         <h1>在线客服</h1>
         <span class="identity" role="status" aria-live="polite"><el-icon v-if="visit"><CircleCheck /></el-icon>{{ feedback }}</span>
       </header>
-      <ChatPanel v-if="chat && visit" :key="chat.sid" v-bind="chat" @expired="recheckAccess">
+      <ChatPanel v-if="chat && visit" :key="chat.sid" v-bind="chat" :embedded="embedded" @expired="recheckAccess">
         <template #sidebar>
           <details class="customer-resume">
             <summary><el-icon><Connection /></el-icon>接续访客对话</summary>
