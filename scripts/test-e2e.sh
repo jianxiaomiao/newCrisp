@@ -25,6 +25,7 @@ docker info --format '{{.ServerVersion}}' >/dev/null
 "$maven" -B -DskipTests package
 
 mysql_password=$(openssl rand -hex 24)
+fixture_dir=''
 container=$(docker create --rm \
   --label com.newcrisp.fixture=playwright \
   --publish 127.0.0.1::3306 \
@@ -41,6 +42,9 @@ cleanup() {
     if (( test_status == 0 )); then
       test_status=1
     fi
+  fi
+  if [[ -n "$fixture_dir" ]]; then
+    rm -rf -- "$fixture_dir"
   fi
   exit "$test_status"
 }
@@ -76,5 +80,31 @@ export SPRING_FLYWAY_USER="$SPRING_DATASOURCE_USERNAME"
 export SPRING_FLYWAY_PASSWORD="$SPRING_DATASOURCE_PASSWORD"
 export NEWCRISP_E2E_MYSQL_CONTAINER="$container"
 export NEWCRISP_E2E_PORT="$port"
+export NEWCRISP_PUBLIC_ORIGIN="http://127.0.0.1:$port"
+export NEWCRISP_E2E_PLATFORM_KEY
+NEWCRISP_E2E_PLATFORM_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')
+export NEWCRISP_PLATFORM_KEY_SHA256
+NEWCRISP_PLATFORM_KEY_SHA256=$(printf '%s' "$NEWCRISP_E2E_PLATFORM_KEY" | openssl dgst -sha256 -r | awk '{print $1}')
+
+# Override runtime variables so the fixture never points at a configured development service.
+export NEWCRISP_NEXUS_VERIFY_URL='' NEWCRISP_NEXUS_VERIFY_KEY='' NEWCRISP_NEXUS_VERIFICATION_TTL=0s
+export NEWCRISP_E2E_NEXUS_WORK=''
+if [[ -n "${NEWCRISP_E2E_NEXUS_ROOT:-}" ]]; then
+  fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/newcrisp-nexus.XXXXXX")
+  export NEWCRISP_E2E_NEXUS_WORK="$fixture_dir"
+  export NEWCRISP_E2E_NEXUS_API_PORT=${NEWCRISP_E2E_NEXUS_API_PORT:-18761}
+  export NEWCRISP_E2E_NEXUS_WEB_PORT=${NEWCRISP_E2E_NEXUS_WEB_PORT:-18762}
+  export NEWCRISP_NEXUS_VERIFY_URL="http://127.0.0.1:$NEWCRISP_E2E_NEXUS_API_PORT/api/internal/support/chat/session-status"
+  NEWCRISP_NEXUS_VERIFY_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')
+  export NEWCRISP_E2E_NEXUS_DB_PASSWORD
+  NEWCRISP_E2E_NEXUS_DB_PASSWORD=$(openssl rand -hex 24)
+  export NEWCRISP_E2E_NEXUS_DB_URL="jdbc:mysql://$mysql_address/nexus_test?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+  docker exec -i "$container" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql --user=root' <<SQL
+CREATE DATABASE nexus_test CHARACTER SET utf8mb4;
+CREATE USER 'nexus_test_user'@'%' IDENTIFIED BY '$NEWCRISP_E2E_NEXUS_DB_PASSWORD';
+GRANT ALL PRIVILEGES ON nexus_test.* TO 'nexus_test_user'@'%';
+SQL
+  bash scripts/prepare-nexus-e2e.sh "$NEWCRISP_E2E_NEXUS_ROOT" "$fixture_dir" "$maven"
+fi
 
 node node_modules/@playwright/test/cli.js test "$@"

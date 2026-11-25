@@ -3,6 +3,9 @@ server:
 spring:
   application:
     name: newcrisp
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   sql:
     init:
       mode: never
@@ -22,3 +25,10 @@ management:
       group:
         readiness:
           include: readinessState,db
+newcrisp:
+  identity:
+    public-origin: ${NEWCRISP_PUBLIC_ORIGIN:http://127.0.0.1:8080}
+    platform-key-sha256: ${NEWCRISP_PLATFORM_KEY_SHA256:}
+    nexus-verify-url: ${NEWCRISP_NEXUS_VERIFY_URL:}
+    nexus-verify-key: ${NEWCRISP_NEXUS_VERIFY_KEY:}
+    nexus-verification-ttl: ${NEWCRISP_NEXUS_VERIFICATION_TTL:60s}

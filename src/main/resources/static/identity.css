@@ -1,0 +1,15 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  color: #183633;
+  background: #f3f7f5;
+}
+
+body { margin: 0; padding: clamp(1rem, 6vw, 4rem) 1rem; }
+main { max-width: 28rem; margin: auto; padding: 2rem; box-sizing: border-box; background: white; border: 1px solid #cddfd7; border-radius: 1rem; }
+h1 { margin: 0 0 1.25rem; font-size: 1.5rem; }
+label { display: block; margin: 0 0 1rem; font-weight: 600; }
+input { display: block; box-sizing: border-box; width: 100%; margin-top: .4rem; padding: .65rem .75rem; border-radius: .5rem; border: 1px solid #a6beb2; font: inherit; }
+button { min-height: 2.75rem; padding: .5rem 1.1rem; border: 0; border-radius: .5rem; background: #176b5d; color: white; font: inherit; cursor: pointer; }
+button:disabled { opacity: .55; }
+:focus-visible { outline: 2px solid #176b5d; outline-offset: 3px; }

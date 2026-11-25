@@ -9,6 +9,7 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: './e2e',
+  workers: 1,
   use: { baseURL, browserName: 'chromium' },
   webServer: {
     command: 'java -jar target/newcrisp-server.jar',

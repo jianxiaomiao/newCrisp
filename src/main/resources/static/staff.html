@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>客服工作台 · NewCrisp</title>
+  <link rel="stylesheet" href="/identity.css">
+  <script type="module" src="/staff.js"></script>
+</head>
+<body>
+  <main>
+    <h1 id="heading">租户管理员登录</h1>
+    <p id="feedback" role="status" aria-live="polite"></p>
+    <form id="login" hidden>
+      <label>租户代码<input name="tenantCode" required autocomplete="organization" pattern="[a-z][a-z0-9\-]{2,47}"></label>
+      <label>邮箱<input name="email" required type="email" autocomplete="username" maxlength="254"></label>
+      <label>密码<input name="password" required type="password" autocomplete="current-password" maxlength="72"></label>
+      <button type="submit">登录</button>
+    </form>
+    <section id="profile" aria-labelledby="heading" hidden>
+      <p id="workspace"></p>
+      <p id="email"></p>
+      <button id="logout" type="button">退出登录</button>
+    </section>
+  </main>
+</body>
+</html>
