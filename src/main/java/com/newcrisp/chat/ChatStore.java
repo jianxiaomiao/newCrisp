@@ -15,8 +15,12 @@ import org.springframework.stereotype.Repository;
 @Repository
 class ChatStore {
     private final JdbcClient jdbc;
+    private final CustomerUnread customerUnread;
 
-    ChatStore(JdbcClient jdbc) { this.jdbc = jdbc; }
+    ChatStore(JdbcClient jdbc, CustomerUnread customerUnread) {
+        this.jdbc = jdbc;
+        this.customerUnread = customerUnread;
+    }
 
     boolean lockCustomer(Actor actor) {
         return jdbc.sql("SELECT id FROM customer WHERE tenant_id = ? AND id = ? FOR UPDATE")
@@ -125,20 +129,19 @@ class ChatStore {
     }
 
     Summary summary(Actor actor) {
-        if (!actor.customer() && actor.agentDepartments().isEmpty()) return new Summary(0, 0);
-        long pending = actor.customer() ? 0 : jdbc.sql("""
+        if (actor.customer()) return new Summary(0, customerUnread.forCustomer(actor.tenantId(), actor.id()));
+        if (actor.agentDepartments().isEmpty()) return new Summary(0, 0);
+        long pending = jdbc.sql("""
                 SELECT COUNT(*) FROM conversation WHERE tenant_id = :tenant AND status = 'WAITING' AND department_id IN (:departments)
                 """).param("tenant", actor.tenantId()).param("departments", actor.agentDepartments()).query(Long.class).single();
-        String scope = actor.customer() ? "c.customer_id = :actor AND m.staff_sender_id IS NOT NULL AND m.seq > c.customer_read_seq"
-                : "c.assignee_id = :actor AND c.status = 'ACTIVE' AND c.department_id IN (:departments) "
-                    + "AND m.customer_sender_id IS NOT NULL AND m.seq > c.staff_read_seq";
-        var query = jdbc.sql("""
+        long unread = jdbc.sql("""
                 SELECT COUNT(*) FROM conversation c JOIN conversation_message m
                 ON m.tenant_id = c.tenant_id AND m.conversation_id = c.id
-                WHERE c.tenant_id = :tenant AND
-                """ + scope).param("tenant", actor.tenantId()).param("actor", actor.id());
-        if (!actor.customer()) query.param("departments", actor.agentDepartments());
-        return new Summary(pending, query.query(Long.class).single());
+                WHERE c.tenant_id = :tenant AND c.assignee_id = :actor AND c.status = 'ACTIVE'
+                  AND c.department_id IN (:departments) AND m.customer_sender_id IS NOT NULL AND m.seq > c.staff_read_seq
+                """).param("tenant", actor.tenantId()).param("actor", actor.id()).param("departments", actor.agentDepartments())
+                .query(Long.class).single();
+        return new Summary(pending, unread);
     }
 
     boolean advanceRead(Conversation chat, Actor actor, long seq) {

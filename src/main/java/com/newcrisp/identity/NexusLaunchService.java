@@ -1,5 +1,6 @@
 package com.newcrisp.identity;
 
+import com.newcrisp.chat.CustomerUnread;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -21,15 +22,17 @@ class NexusLaunchService {
     private final Clock clock;
     private final IdentityConfiguration.Settings settings;
     private final WebTokens tokens;
+    private final CustomerUnread unread;
 
     NexusLaunchService(NexusStore store, NexusSessionVerifier verifier, TransactionTemplate transactions, Clock clock,
-                       IdentityConfiguration.Settings settings, WebTokens tokens) {
+                       IdentityConfiguration.Settings settings, WebTokens tokens, CustomerUnread unread) {
         this.store = store;
         this.verifier = verifier;
         this.transactions = transactions;
         this.clock = clock;
         this.settings = settings;
         this.tokens = tokens;
+        this.unread = unread;
     }
 
     @Transactional
@@ -51,16 +54,26 @@ class NexusLaunchService {
     }
 
     String issue(String authorization, long userId, long sessionId) {
+        var key = requireIntegration(authorization);
+        verifier.requireConfigured();
+        String grant = IdentityTokens.generate();
+        store.createGrant(IdentityTokens.digest(grant), key, userId, sessionId, now().plus(GRANT_TTL));
+        return grant;
+    }
+
+    long unread(String authorization, long userId) {
+        var key = requireIntegration(authorization);
+        return unread.forNexusUser(key.tenantId(), key.integrationId(), userId);
+    }
+
+    private NexusStore.IntegrationKey requireIntegration(String authorization) {
         String credential = IdentityTokens.bearer(authorization);
         if (credential == null || !credential.matches("[a-f0-9-]{36}\\.[A-Za-z0-9_-]{43}")) {
             throw IdentityError.unauthorized();
         }
         var key = store.integrationKey(credential.substring(0, 36)).orElseThrow(IdentityError::unauthorized);
         if (!IdentityTokens.matches(credential.substring(37), key.secretHash())) throw IdentityError.unauthorized();
-        verifier.requireConfigured();
-        String grant = IdentityTokens.generate();
-        store.createGrant(IdentityTokens.digest(grant), key, userId, sessionId, now().plus(GRANT_TTL));
-        return grant;
+        return key;
     }
 
     WebTokens.Issued redeem(String token, String origin) {

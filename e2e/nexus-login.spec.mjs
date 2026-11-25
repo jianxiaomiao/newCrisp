@@ -100,14 +100,7 @@ test.describe('Nexus login against isolated MySQL', () => {
     async function staff(tenant, email = tenant.adminEmail, password = tenant.adminPassword) {
       const context = await browser.newContext({ baseURL: process.env.NEWCRISP_PUBLIC_ORIGIN });
       opened.push(context);
-      const tab = await context.newPage();
-      await tab.goto('/staff.html');
-      await tab.getByLabel('租户代码').fill(tenant.code);
-      await tab.getByLabel('邮箱', { exact: true }).fill(email);
-      await tab.getByLabel('密码', { exact: true }).fill(password);
-      await tab.getByRole('button', { name: '登录', exact: true }).click();
-      await expect(tab.getByRole('heading', { name: email === tenant.adminEmail ? '租户管理' : '客服工作台' })).toBeVisible();
-      return tab;
+      return openStaff(context, tenant, email, password);
     }
     const firstAgent = 'one-agent@example.test';
     const secondAgent = 'two-agent@example.test';
@@ -226,7 +219,194 @@ test.describe('Nexus login against isolated MySQL', () => {
       await Promise.all(opened.map((context) => context.close()));
     }
   });
+
+  test('Nexus unread badge follows read receipts, the active account and the integration tenant', async ({ page, browser, request }) => {
+    test.setTimeout(100_000);
+    const primary = { email: 'unread-customer@example.test', password: 'Nexus-Unread!2026' };
+    const alternate = { email: 'unread-other@example.test', password: 'Nexus-Unread!2026' };
+    for (const person of [primary, alternate]) {
+      expect((await request.post(`${nexusApi}/api/auth/register`, { data: { ...person, displayName: '未读验收' } })).ok()).toBe(true);
+    }
+    const login = await request.post(`${nexusApi}/api/auth/login`, { data: primary });
+    expect(login.ok()).toBe(true);
+    const { accessToken } = (await login.json()).data;
+    const { sub, sid } = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64url').toString('utf8'));
+    expect((await request.get(`${nexusApi}/api/support/chat/unread`)).status()).toBe(401);
+
+    const openContexts = [];
+    const fixtureContext = async () => {
+      const context = await browser.newContext({ baseURL: process.env.NEWCRISP_PUBLIC_ORIGIN });
+      openContexts.push(context);
+      return context;
+    };
+    let releaseOld = () => {};
+    try {
+      const agent = async (tenant, email) => {
+        const context = await fixtureContext();
+        const admin = await openStaff(context, tenant, tenant.adminEmail, tenant.adminPassword);
+        const password = 'Unread-Agent!2026';
+        await createMember(admin, email, password, 'AGENT');
+        await admin.getByRole('button', { name: '退出登录' }).click();
+        return openStaff(context, tenant, email, password);
+      };
+      const [agentA, agentB] = await Promise.all([agent(first, 'unread-agent-a@example.test'), agent(second, 'unread-agent-b@example.test')]);
+
+      await page.goto(`${nexusOrigin}/login`);
+      await page.bringToFront();
+      const empty = nextUnread(page);
+      await signInNexus(page, primary);
+      expect((await (await empty).json()).data.unread).toBe(0);
+      await expect(page.getByRole('button', { name: '在线客服', exact: true })).toBeVisible();
+      await page.getByRole('button', { name: '在线客服', exact: true }).click();
+      await expect(page.getByRole('status')).toHaveText('已通过 Nexus 登录');
+      const chatA = await startConversation(page, '租户 A 的未读验收');
+      const back = nextUnread(page);
+      await page.goBack();
+      expect((await (await back).json()).data.unread).toBe(0);
+
+      const otherContext = await fixtureContext();
+      const other = await otherContext.newPage();
+      const issue = await request.post('/integrations/nexus/launch-grants', {
+        headers: { Authorization: `Bearer ${keyB}` }, data: { userId: Number(sub), sessionId: Number(sid) },
+      });
+      expect(issue.status()).toBe(201);
+      const { grant } = await issue.json();
+      await other.goto(`${nexusOrigin}/login`);
+      await other.evaluate(({ action, grant }) => {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = action;
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'grant';
+        input.value = grant;
+        form.append(input);
+        document.body.append(form);
+        form.submit();
+      }, { action: `${process.env.NEWCRISP_PUBLIC_ORIGIN}/launch/nexus`, grant });
+      await expect(other.getByText(second.name)).toBeVisible();
+      const chatB = await startConversation(other, '租户 B 的未读验收');
+      await otherContext.close();
+      await staffReplies(agentB, chatB, ['B 的第一条回复', 'B 的第二条回复']);
+      const fromB = () => request.post('/integrations/nexus/unread-summary', {
+        headers: { Authorization: `Bearer ${keyB}` }, data: { userId: Number(sub) },
+      });
+      expect(await (await fromB()).json()).toEqual({ unread: 2 });
+      expect((await request.post('/integrations/nexus/unread-summary', { data: { userId: Number(sub) } })).status()).toBe(401);
+      const tenantInjection = await request.post('/integrations/nexus/unread-summary', {
+        headers: { Authorization: `Bearer ${keyB}` }, data: { userId: Number(sub), tenantId: 1 },
+      });
+      expect(tenantInjection.status()).toBe(400);
+
+      const aOnly = await refreshNexusBadge(page);
+      expect(aOnly.unread).toBe(0);
+      await staffReplies(agentA, chatA, ['A 的一条客服回复']);
+      expect((await refreshNexusBadge(page)).unread).toBe(1);
+      const badge = page.getByRole('button', { name: '在线客服，1 条未读回复' });
+      await expect(badge.locator('.chat-unread-count')).toHaveText('1');
+      await page.getByRole('button', { name: '收起导航' }).click();
+      await expect(badge.locator('.chat-unread-count')).toBeVisible();
+      await page.getByRole('button', { name: '展开导航' }).click();
+
+      let captured;
+      const oldUnread = new Promise((resolve) => { captured = resolve; });
+      const gate = new Promise((resolve) => { releaseOld = resolve; });
+      let firstRequest = true;
+      await page.route('**/api/support/chat/unread', async (route) => {
+        if (!firstRequest) return route.continue();
+        firstRequest = false;
+        const response = await route.fetch();
+        captured((await response.json()).data.unread);
+        await gate;
+        // The old XHR may have been aborted by the account switch.
+        await route.fulfill({ response }).catch(() => {});
+      });
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      expect(await oldUnread).toBe(1);
+      await page.getByRole('button', { name: '退出登录' }).click();
+      await expect(page).toHaveURL(/\/login$/);
+      const different = nextUnread(page);
+      await signInNexus(page, alternate);
+      const alternativeSummary = await different;
+      expect((await alternativeSummary.json()).data.unread).toBe(0);
+      const authorization = await alternativeSummary.request().headerValue('authorization');
+      const spoofed = await request.get(`${nexusApi}/api/support/chat/unread?userId=${sub}&tenantCode=${second.code}`, {
+        headers: { Authorization: authorization },
+      });
+      expect(spoofed.status()).toBe(200);
+      expect((await spoofed.json()).data.unread).toBe(0);
+      releaseOld();
+      await page.unroute('**/api/support/chat/unread');
+      expect((await refreshNexusBadge(page)).unread).toBe(0);
+      await expect(page.locator('.chat-unread-count')).toHaveCount(0);
+
+      await page.getByRole('button', { name: '退出登录' }).click();
+      await expect(page).toHaveURL(/\/login$/);
+      await signInNexus(page, primary);
+      await badge.click();
+      await expect(page.getByRole('list', { name: '消息' }).getByText('A 的一条客服回复')).toBeVisible();
+      await expect.poll(async () => (await browserApi(page, '/api/v1/customer/summary')).data?.unread).toBe(0);
+      const read = nextUnread(page);
+      await page.goBack();
+      expect((await (await read).json()).data.unread).toBe(0);
+      await expect(page.getByRole('button', { name: '在线客服', exact: true })).toBeVisible();
+      await expect(page.locator('.chat-unread-count')).toHaveCount(0);
+      expect(await (await fromB()).json()).toEqual({ unread: 2 });
+    } finally {
+      releaseOld();
+      await Promise.all(openContexts.map((context) => context.close()));
+    }
+  });
 });
+
+async function openStaff(context, tenant, email, password) {
+  const tab = await context.newPage();
+  await tab.goto('/staff.html');
+  await tab.getByLabel('租户代码').fill(tenant.code);
+  await tab.getByLabel('邮箱', { exact: true }).fill(email);
+  await tab.getByLabel('密码', { exact: true }).fill(password);
+  await tab.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(tab.getByRole('heading', { name: email === tenant.adminEmail ? '租户管理' : '客服工作台' })).toBeVisible();
+  return tab;
+}
+
+async function signInNexus(page, account) {
+  await page.getByPlaceholder('请输入邮箱').fill(account.email);
+  await page.getByPlaceholder('请输入密码').fill(account.password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+}
+
+function nextUnread(page) {
+  return page.waitForResponse((response) => response.url() === `${nexusOrigin}/api/support/chat/unread` && response.ok(), { timeout: 12_000 });
+}
+
+async function refreshNexusBadge(page) {
+  const fresh = nextUnread(page);
+  await page.bringToFront();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  const response = await fresh;
+  expect(response.headers()['cache-control']).toBe('no-store');
+  return (await response.json()).data;
+}
+
+async function startConversation(page, text) {
+  const response = await write(page, '/api/v1/customer/conversations', { text, clientMessageId: randomUUID() });
+  expect(response.status).toBe(201);
+  return response.data.message.conversationId;
+}
+
+async function staffReplies(page, conversationId, texts) {
+  const list = await browserApi(page, '/api/v1/staff/conversations?view=PENDING');
+  const item = list.data.items.find((row) => row.id === conversationId);
+  expect(item).toBeDefined();
+  const path = `/api/v1/staff/conversations/${conversationId}`;
+  const claim = await write(page, `${path}/claim`, { actionId: randomUUID(), stateVersion: item.stateVersion });
+  expect(claim.status).toBe(200);
+  for (const text of texts) {
+    const reply = await write(page, `${path}/messages`, { text, clientMessageId: randomUUID(), stateVersion: claim.data.stateVersion });
+    expect(reply.status).toBe(201);
+  }
+}
 
 async function redeem(request, grant, origin = nexusOrigin) {
   const response = await request.post('/launch/nexus', {

@@ -1,5 +1,6 @@
 package com.newcrisp.identity;
 
+import com.newcrisp.chat.CustomerUnread;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -34,12 +35,13 @@ class NexusLaunchServiceTest {
     @Mock NexusSessionVerifier verifier;
     @Mock PlatformTransactionManager transactionManager;
     @Mock WebTokens tokens;
+    @Mock CustomerUnread unread;
     NexusLaunchService service;
 
     @BeforeEach
     void setUp() {
         var settings = new IdentityConfiguration.Settings("https://chat.example.test", "", "", "", Duration.ofSeconds(60));
-        service = new NexusLaunchService(store, verifier, new TransactionTemplate(transactionManager), CLOCK, settings, tokens);
+        service = new NexusLaunchService(store, verifier, new TransactionTemplate(transactionManager), CLOCK, settings, tokens, unread);
     }
 
     @Test
@@ -60,6 +62,19 @@ class NexusLaunchServiceTest {
 
         assertThatThrownBy(() -> service.issue("Bearer " + KEY_ID + "." + token, 7, 11)).hasMessage("SESSION_REQUIRED");
         verify(store, never()).createGrant(any(), any(), anyLong(), anyLong(), any());
+    }
+
+    @Test
+    void unreadUsesCredentialScopeAndRejectsAnInvalidKeyBeforeQueryingMessages() {
+        String secret = IdentityTokens.generate();
+        var key = new NexusStore.IntegrationKey(17, "nexus-a", IdentityTokens.digest(secret));
+        when(store.integrationKey(KEY_ID)).thenReturn(Optional.of(key));
+
+        assertThatThrownBy(() -> service.unread("Bearer " + KEY_ID + "." + token, 7)).hasMessage("SESSION_REQUIRED");
+        verifyNoInteractions(unread);
+        when(unread.forNexusUser(17, "nexus-a", 7)).thenReturn(3L);
+        org.assertj.core.api.Assertions.assertThat(service.unread("Bearer " + KEY_ID + "." + secret, 7)).isEqualTo(3);
+        verifyNoInteractions(verifier, tokens);
     }
 
     @Test

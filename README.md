@@ -24,7 +24,7 @@ npm run test:e2e
 
 脚本打包后端，创建临时 MySQL 8.4 容器和 `newcrisp_e2e` 测试库，分配回环数据库端口并生成一次性凭据。Playwright 验证 Flyway V1–V4、平台开通、租户隔离、多标签刷新、令牌重放、票据消费和退出断连。脚本退出时清理本轮容器及其匿名数据卷。
 
-下列命令还会验收真实 Nexus 登录、WebSocket 消息确认丢失重试、并发领取、断线补读、退回及结束。
+下列命令还会验收真实 Nexus 登录、控制台未读角标与读回执、账号切换、WebSocket 消息确认丢失重试、并发领取、断线补读、退回及结束。
 
 ```sh
 NEWCRISP_E2E_NEXUS_ROOT=/Users/xiaomiao/Nexus npm run test:e2e
@@ -50,6 +50,8 @@ export NEWCRISP_MAVEN='/Applications/IntelliJ IDEA.app/Contents/plugins/maven/li
 4. 另生成一个独立的 32 字节 Base64url 复核凭据。NewCrisp 使用 `NEWCRISP_NEXUS_VERIFY_KEY` 保存原凭据，`NEWCRISP_NEXUS_VERIFY_URL` 指向 Nexus 的 `/api/internal/support/chat/session-status`。Nexus 使用 `NEXUS_CHAT_VERIFY_KEY_SHA256` 保存该凭据的 SHA-256 十六进制摘要。当前实例接入一个 Nexus 身份源，客户会话的 Nexus 校验结果最多缓存 60 秒。
 
 平台 API 使用运维凭据，客户和员工使用各自的 JWT 受众和 Refresh Cookie。正式环境的公开来源使用 HTTPS。Nexus 跳转凭证有效 60 秒，浏览器以表单正文提交。凭证消费与短期开通凭据原子写入，NewCrisp 页面在同源 Web Lock 内开通正式会话。
+
+Nexus Web 的「在线客服」角标通过 Nexus 后端查询当前登录用户的未读回复总数。NewCrisp 从接入凭据确定租户和入口。控制台返回、聚焦或进入前台时刷新，前台停留时每 15 秒补查。已读状态以客服页面保存的读回执为准。
 
 ## 会话与工作台
 

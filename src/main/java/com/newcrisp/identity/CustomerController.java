@@ -31,6 +31,12 @@ class CustomerController {
                 .body(new GrantResponse(nexus.issue(auth, input.userId(), input.sessionId())));
     }
 
+    @PostMapping(value = "/integrations/nexus/unread-summary", consumes = MediaType.APPLICATION_JSON_VALUE)
+    ResponseEntity<UnreadResponse> unread(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String auth,
+                                         @Valid @RequestBody UnreadInput input) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(new UnreadResponse(nexus.unread(auth, input.userId())));
+    }
+
     @PostMapping(value = "/launch/nexus", consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
     ResponseEntity<Void> redeem(HttpServletRequest request) {
         String[] grants = request.getParameterValues("grant");
@@ -63,4 +69,6 @@ class CustomerController {
 
     record GrantInput(@Positive long userId, @Positive long sessionId) {}
     record GrantResponse(String grant) {}
+    record UnreadInput(@Positive long userId) {}
+    record UnreadResponse(long unread) {}
 }
