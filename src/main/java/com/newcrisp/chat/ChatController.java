@@ -43,12 +43,20 @@ class ChatController {
         var row = chat.view(actor, id);
         boolean owner = ChatService.owns(actor, row);
         boolean active = row.state() == State.ACTIVE;
+        boolean canSupervise = !actor.customer() && active && actor.supervisorDepartments().contains(row.departmentId());
         return ok(new Detail(row.id(), row.state(), Long.toString(row.version()), Long.toString(row.lastSeq()),
                 Long.toString(row.lastCustomerSeq()), Long.toString(actor.customer() ? row.customerReadSeq() : owner ? row.staffReadSeq() : 0),
                 actor.customer() ? row.state() != State.CLOSED : owner && active,
-                !actor.customer() && active && actor.supervisorDepartments().contains(row.departmentId()),
+                canSupervise, canSupervise,
                 owner && active, chat.assigneeName(row),
                 actor.customer() ? null : presence.online(row.tenantId(), row.customerId())));
+    }
+
+    @GetMapping("/conversations/{id}/transfer-candidates")
+    ResponseEntity<java.util.List<StaffOption>> transferCandidates(@PathVariable String side, @PathVariable String id,
+                                                                    HttpServletRequest request) {
+        if (!"staff".equals(side)) throw IdentityError.notFound();
+        return ok(chat.transferCandidates(actor(request, side, false), id));
     }
 
     @GetMapping("/conversations/{id}/actions")
@@ -82,7 +90,7 @@ class ChatController {
         return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
     }
 
-    @PostMapping("/conversations/{id}/{operation:claim|return|close}")
+    @PostMapping("/conversations/{id}/{operation:claim|return|transfer|close}")
     ResponseEntity<ActionResult> action(@PathVariable String side, @PathVariable String id, @PathVariable String operation,
             @RequestBody Action input, HttpServletRequest request) {
         if (!"staff".equals(side)) throw IdentityError.notFound();

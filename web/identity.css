@@ -40,6 +40,7 @@ select, textarea { display: block; width: 100%; box-sizing: border-box; padding:
 .chat-log li { padding: .65rem .85rem; margin: .4rem 0; background: #eff7f1; border-radius: .6rem; }
 .chat-log p { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat-form { margin-top: 1rem; }
+.chat-transfer { margin: .75rem 0; padding: .75rem; border: 1px solid #cddfd7; border-radius: .6rem; }
 .chat-form textarea { min-height: 5rem; resize: vertical; }
 .chat-title { margin-top: 0; }
 .chat-notice { color: #8d4023; }

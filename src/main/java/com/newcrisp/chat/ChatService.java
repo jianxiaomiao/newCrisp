@@ -11,6 +11,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -86,19 +87,22 @@ class ChatService {
         String key = uuid(input.actionId());
         long version = number(input.stateVersion());
         Long seen = op == Operation.CLOSE ? number(input.observedCustomerSeq()) : null;
+        String target = op == Operation.TRANSFER ? uuid(input.targetStaffId()) : null;
         String reason = input.reason() == null || input.reason().isBlank() ? null : input.reason().strip();
         if (reason != null && (op != Operation.RETURN || reason.codePointCount(0, reason.length()) > 400)) {
             throw invalid("INVALID_ACTION_REASON");
         }
-        if (op != Operation.CLOSE && input.observedCustomerSeq() != null) throw invalid("INVALID_ACTION");
+        if ((op != Operation.CLOSE && input.observedCustomerSeq() != null)
+                || (op != Operation.TRANSFER && input.targetStaffId() != null)) throw invalid("INVALID_ACTION");
         Conversation chat = require(actor, uuid(id), true);
-        Set<String> departments = op == Operation.RETURN ? actor.supervisorDepartments() : actor.agentDepartments();
-        if (!departments.contains(chat.departmentId())) throw IdentityError.notFound();
+        if (op == Operation.RETURN || op == Operation.TRANSFER) requireSupervisor(actor, chat);
+        else if (!actor.agentDepartments().contains(chat.departmentId())) throw IdentityError.notFound();
         var prior = store.action(actor, key);
         if (prior.isPresent()) {
             var action = prior.get();
             if (!action.conversationId().equals(chat.id()) || action.operation() != op || action.version() != version
-                    || !Objects.equals(action.observedCustomerSeq(), seen) || !Objects.equals(action.reason(), reason)) {
+                    || !Objects.equals(action.observedCustomerSeq(), seen) || !Objects.equals(action.reason(), reason)
+                    || (op == Operation.TRANSFER && !Objects.equals(action.newAssignee(), target))) {
                 throw conflict("ACTION_ID_CONFLICT");
             }
             return result(chat, op, version);
@@ -111,8 +115,14 @@ class ChatService {
                 yield actor.id();
             }
             case RETURN -> {
-                if (chat.state() != State.ACTIVE) throw conflict("INVALID_CONVERSATION_STATE");
+                requireActive(chat);
                 yield null;
+            }
+            case TRANSFER -> {
+                requireActive(chat);
+                if (target.equals(chat.assigneeId())) throw conflict("ALREADY_ASSIGNED");
+                if (!store.lockTransferTarget(chat, target)) throw IdentityError.notFound();
+                yield target;
             }
             case CLOSE -> {
                 if (chat.state() != State.ACTIVE || !owns(actor, chat)) throw IdentityError.notFound();
@@ -131,6 +141,21 @@ class ChatService {
         } catch (DuplicateKeyException conflict) {
             throw conflict("ACTION_ID_CONFLICT");
         }
+    }
+
+    List<StaffOption> transferCandidates(Actor actor, String id) {
+        var chat = require(actor, uuid(id), false);
+        requireSupervisor(actor, chat);
+        requireActive(chat);
+        return store.transferCandidates(chat);
+    }
+
+    private static void requireSupervisor(Actor actor, Conversation chat) {
+        if (!actor.supervisorDepartments().contains(chat.departmentId())) throw IdentityError.notFound();
+    }
+
+    private static void requireActive(Conversation chat) {
+        if (chat.state() != State.ACTIVE) throw conflict("INVALID_CONVERSATION_STATE");
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -212,7 +237,7 @@ class ChatService {
 
     private static State resultState(Operation op) {
         return switch (op) {
-            case CLAIM -> State.ACTIVE;
+            case CLAIM, TRANSFER -> State.ACTIVE;
             case RETURN -> State.WAITING;
             case CLOSE -> State.CLOSED;
         };

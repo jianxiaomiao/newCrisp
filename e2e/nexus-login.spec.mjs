@@ -495,6 +495,142 @@ test.describe('Nexus login against isolated MySQL', () => {
       await Promise.all(openContexts.map((context) => context.close()));
     }
   });
+
+  test('a supervisor hands off an active conversation and the existing sockets switch ownership', async ({ page, browser, request }) => {
+    test.setTimeout(100_000);
+    const contexts = [];
+    const open = async (tenant, email = tenant.adminEmail, password = tenant.adminPassword) => {
+      const context = await browser.newContext({ baseURL: process.env.NEWCRISP_PUBLIC_ORIGIN });
+      contexts.push(context);
+      return openStaff(context, tenant, email, password);
+    };
+    const staff = '/api/v1/staff';
+    const password = 'Transfer-Staff!2026';
+    const initial = '转派前的客户原话';
+    const firstReply = '原客服已处理的历史回复';
+    const followUp = '转派后的客户补充';
+    const secondReply = '新客服在原会话继续回复';
+    const customerAccount = { email: 'transfer-customer@example.test', password: 'Nexus-Transfer!2026' };
+
+    async function member(admin, address, displayName, role, departmentCode = 'support') {
+      const email = `transfer-${address}@example.test`;
+      const result = await write(admin, `${staff}/members`, { email, password, departmentCode, displayName, role });
+      expect(result.status).toBe(201);
+      return { email, id: result.data.staffId, displayName };
+    }
+
+    try {
+      const [admin, otherAdmin] = await Promise.all([open(first), open(second)]);
+      expect(await write(admin, `${staff}/departments`, { code: 'transfer-billing', name: '转派验收账单部门' }))
+        .toMatchObject({ status: 201 });
+      const [origin, target, manager, wrongDepartment, wrongSupervisor, wrongTenant] = await Promise.all([
+        member(admin, 'original', '原负责人', 'AGENT'),
+        member(admin, 'next', '接手负责人', 'AGENT'),
+        member(admin, 'manager', '执行转派的主管', 'SUPERVISOR'),
+        member(admin, 'billing', '外部门客服', 'AGENT', 'transfer-billing'),
+        member(admin, 'billing-manager', '外部门主管', 'SUPERVISOR', 'transfer-billing'),
+        member(otherAdmin, 'outsider', '外租户客服', 'AGENT'),
+      ]);
+      const [original, incoming, supervisor, otherSupervisor, outsider] = await Promise.all([
+        open(first, origin.email, password), open(first, target.email, password),
+        open(first, manager.email, password), open(first, wrongSupervisor.email, password), open(second, wrongTenant.email, password),
+      ]);
+      const registration = await request.post(`${nexusApi}/api/auth/register`, {
+        data: { ...customerAccount, displayName: '会话转派验收客户' },
+      });
+      expect(registration.ok()).toBe(true);
+      await page.goto(`${nexusOrigin}/login`);
+      await signInNexus(page, customerAccount);
+      await page.getByRole('button', { name: '在线客服' }).click();
+      await expect(page.getByRole('status')).toHaveText('已通过 Nexus 登录');
+      const id = await startConversation(page, initial);
+      const path = `${staff}/conversations/${id}`;
+      const customerPath = `/api/v1/customer/conversations/${id}`;
+      await staffReplies(original, id, [firstReply]);
+      const previous = (await browserApi(original, path)).data;
+
+      await original.getByRole('button', { name: '我负责' }).click();
+      await original.getByRole('button', { name: firstReply }).click();
+      await expect(original.locator('.chat-log')).toContainText(initial);
+      await expect(original.getByRole('button', { name: '发送', exact: true })).toBeVisible();
+      await expect(original.getByRole('button', { name: '转派会话' })).toHaveCount(0);
+      await incoming.getByRole('button', { name: '我负责' }).click();
+      await expect(incoming.locator('.chat-connection')).toHaveText('');
+      await expect(incoming.getByRole('button', { name: firstReply })).toHaveCount(0);
+      expect((await browserApi(incoming, `${path}/messages`)).status).toBe(404);
+
+      await supervisor.getByRole('button', { name: '部门会话' }).click();
+      await supervisor.getByRole('button', { name: firstReply }).click();
+      await expect(supervisor.getByRole('button', { name: '转派会话' })).toBeVisible();
+      const candidatesPath = `${path}/transfer-candidates`;
+      const candidates = (await browserApi(supervisor, candidatesPath)).data.map(({ id }) => id);
+      expect(candidates).toContain(target.id);
+      for (const excluded of [origin, manager, wrongDepartment, wrongTenant]) expect(candidates).not.toContain(excluded.id);
+
+      const attempt = (targetStaffId) => ({ actionId: randomUUID(), stateVersion: previous.stateVersion, targetStaffId });
+      const rejected = await Promise.all([
+        write(supervisor, `${path}/transfer`, attempt(wrongDepartment.id)),
+        write(supervisor, `${path}/transfer`, attempt(wrongTenant.id)),
+        write(otherSupervisor, `${path}/transfer`, attempt(target.id)),
+        write(outsider, `${path}/transfer`, attempt(wrongTenant.id)),
+        write(original, `${path}/transfer`, attempt(target.id)),
+        browserApi(otherSupervisor, candidatesPath),
+        browserApi(outsider, candidatesPath),
+      ]);
+      expect(rejected.map(({ status }) => status)).toEqual([404, 404, 404, 404, 404, 404, 404]);
+      expect((await browserApi(original, path)).data).toMatchObject({ assignee: origin.displayName, stateVersion: previous.stateVersion });
+
+      const [oldSocket, newSocket] = await Promise.all([watchStaffSocket(original), watchStaffSocket(incoming)]);
+      await expect.poll(() => socketState(original, oldSocket)).toEqual({ ready: true, closed: null });
+      await expect.poll(() => socketState(incoming, newSocket)).toEqual({ ready: true, closed: null });
+      const transferred = supervisor.waitForResponse((response) => response.url().endsWith(`${path}/transfer`));
+      await supervisor.getByRole('button', { name: '转派会话' }).click();
+      await supervisor.getByLabel('接手客服').selectOption(target.id);
+      await supervisor.getByRole('button', { name: '确认转派' }).click();
+      const response = await transferred;
+      expect(response.status()).toBe(200);
+      const next = await response.json();
+      expect(next).toEqual({ conversationId: id, status: 'ACTIVE', stateVersion: (BigInt(previous.stateVersion) + 1n).toString() });
+      await expect(supervisor.getByText('会话已转派。')).toBeVisible();
+      expect(await write(supervisor, `${path}/transfer`, response.request().postDataJSON())).toEqual({ status: 200, data: next });
+
+      await expect(incoming.getByRole('button', { name: firstReply })).toBeVisible();
+      await incoming.getByRole('button', { name: firstReply }).click();
+      await expect(incoming.locator('.chat-log')).toContainText(initial);
+      await expect(incoming.locator('.chat-log')).toContainText(firstReply);
+      await expect(incoming.getByRole('button', { name: '发送', exact: true })).toBeVisible();
+      await expect(original.getByRole('button', { name: firstReply })).toHaveCount(0);
+      await expect(original.locator('.chat-log')).toBeEmpty();
+      await expect(original.getByRole('button', { name: '发送', exact: true })).toHaveCount(0);
+      await expect(page.locator('.chat-assignee')).toHaveText(`负责人 ${target.displayName}`);
+
+      await incoming.getByText('操作记录', { exact: true }).click();
+      const history = incoming.locator('.chat-history');
+      await expect(history.getByRole('listitem').filter({ hasText: '转派' })).toContainText(
+        `${origin.displayName}（${origin.email}） → ${target.displayName}（${target.email}）`);
+      const actions = (await browserApi(incoming, `${path}/actions`)).data;
+      expect(actions.map(({ action }) => action)).toEqual(['TRANSFER', 'CLAIM']);
+      expect(actions[0]).toMatchObject({ operator: manager.displayName, previousAssignee: origin, newAssignee: target });
+      for (const suffix of ['', '/messages', '/actions']) expect((await browserApi(original, path + suffix)).status).toBe(404);
+      expect(await sendOnStaffSocket(original, oldSocket, {
+        type: 'message.send', conversationId: id, stateVersion: next.stateVersion, text: '原客服越权回复',
+      })).toMatchObject({ type: 'error', data: { code: 'NOT_FOUND', status: 404 } });
+
+      expect((await write(page, `${customerPath}/messages`, { clientMessageId: randomUUID(), text: followUp })).status).toBe(201);
+      await expect.poll(() => staffSocketMessages(incoming, newSocket)).toContain(followUp);
+      await expect(incoming.locator('.chat-log')).toContainText(followUp);
+      await incoming.getByRole('textbox', { name: '消息' }).fill(secondReply);
+      await incoming.getByRole('button', { name: '发送', exact: true }).click();
+      await expect(page.locator('.chat-log')).toContainText(secondReply);
+      expect(await staffSocketMessages(original, oldSocket)).not.toContain(followUp);
+      expect(await staffSocketMessages(original, oldSocket)).not.toContain(secondReply);
+      expect(await socketState(original, oldSocket)).toEqual({ ready: true, closed: null });
+      const transcript = (await browserApi(page, `${customerPath}/messages`)).data.items;
+      expect(transcript.map(({ text }) => text)).toEqual([initial, firstReply, followUp, secondReply]);
+    } finally {
+      await Promise.all(contexts.map((context) => context.close()));
+    }
+  });
 });
 
 async function openStaff(context, tenant, email, password) {
@@ -504,7 +640,7 @@ async function openStaff(context, tenant, email, password) {
   await tab.getByLabel('邮箱', { exact: true }).fill(email);
   await tab.getByLabel('密码', { exact: true }).fill(password);
   await tab.getByRole('button', { name: '登录', exact: true }).click();
-  await expect(tab.getByRole('heading', { name: email === tenant.adminEmail ? '租户管理' : '客服工作台' })).toBeVisible();
+  await expect(tab.getByRole('heading', { name: email === tenant.adminEmail ? '租户管理' : '客服工作台', exact: true })).toBeVisible();
   return tab;
 }
 
@@ -572,7 +708,7 @@ function watchStaffSocket(page, ticket) {
     const auth = (await import('/web-session.js')).webSession('staff');
     const grant = previousTicket ?? (await (await auth.request('/api/v1/staff/ws-ticket', { method: 'POST' })).json()).ticket;
     const socket = new WebSocket(new URL('/ws/staff', location.href));
-    const state = { ready: false, closed: null };
+    const state = { ready: false, closed: null, socket, messages: [] };
     const key = crypto.randomUUID();
     window.staffSocketChecks ??= {};
     window.staffSocketChecks[key] = state;
@@ -581,6 +717,7 @@ function watchStaffSocket(page, ticket) {
       const frame = JSON.parse(data);
       if (frame.type === 'ready') state.ready = true;
       if (frame.type === 'ping') socket.send(JSON.stringify({ type: 'pong', nonce: frame.data }));
+      if (frame.type === 'message.created') state.messages.push(frame.data.text);
     };
     socket.onclose = (event) => { state.closed = event.code; };
     return key;
@@ -588,7 +725,36 @@ function watchStaffSocket(page, ticket) {
 }
 
 function socketState(page, key) {
-  return page.evaluate((id) => window.staffSocketChecks[id], key);
+  return page.evaluate((id) => {
+    const { ready, closed } = window.staffSocketChecks[id];
+    return { ready, closed };
+  }, key);
+}
+
+function staffSocketMessages(page, key) {
+  return page.evaluate((id) => window.staffSocketChecks[id].messages, key);
+}
+
+function sendOnStaffSocket(page, key, payload) {
+  return page.evaluate(({ key, payload }) => {
+    const { socket } = window.staffSocketChecks[key];
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        socket.removeEventListener('message', receive);
+        reject(new Error('Existing socket did not answer the command'));
+      }, 5_000);
+      function receive(event) {
+        const frame = JSON.parse(event.data);
+        if (frame.requestId !== requestId) return;
+        socket.removeEventListener('message', receive);
+        clearTimeout(timer);
+        resolve(frame);
+      }
+      socket.addEventListener('message', receive);
+      socket.send(JSON.stringify({ ...payload, requestId, clientMessageId: crypto.randomUUID() }));
+    });
+  }, { key, payload });
 }
 
 async function pollQueue(page) {

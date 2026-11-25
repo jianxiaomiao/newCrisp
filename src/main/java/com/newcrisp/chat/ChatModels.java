@@ -11,7 +11,7 @@ final class ChatModels {
 
     enum State { WAITING, ACTIVE, CLOSED }
     enum View { CURRENT, HISTORY, PENDING, MINE, CLOSED, DEPARTMENT }
-    enum Operation { CLAIM, RETURN, CLOSE }
+    enum Operation { CLAIM, RETURN, TRANSFER, CLOSE }
 
     record Conversation(long tenantId, String id, String customerId, String departmentId, String assigneeId,
                         State state, long version, long lastSeq, long lastCustomerSeq, long lastStaffSeq,
@@ -29,17 +29,20 @@ final class ChatModels {
     record MessagePage(List<Message> items, boolean hasMore) {}
     record Send(String clientMessageId, String text, String stateVersion) {}
     record Sent(Message message, boolean replayed) {}
-    record Action(String actionId, String stateVersion, String observedCustomerSeq, String reason) {}
-    record ActionRecord(String conversationId, Operation operation, long version, Long observedCustomerSeq, String reason) {}
+    record Action(String actionId, String stateVersion, String observedCustomerSeq, String reason, String targetStaffId) {}
+    record ActionRecord(String conversationId, Operation operation, long version, Long observedCustomerSeq, String reason,
+                        String newAssignee) {}
     record ActionResult(String conversationId, State status, String stateVersion) {}
-    record ActionHistory(Operation action, String operator, String occurredAt, String reason) {}
+    record StaffOption(String id, String displayName, String email) {}
+    record ActionHistory(Operation action, String operator, String occurredAt, String reason,
+                         StaffOption previousAssignee, StaffOption newAssignee) {}
     record Read(String upToSeq, String stateVersion) {}
     record Summary(long pending, long unread) {}
     record ListItem(String id, State status, String stateVersion, String lastSeq, String lastCustomerSeq,
                     String readSeq, String timestamp, String preview, long unread) {}
     record ConversationPage(List<ListItem> items, String nextCursor) {}
     record Detail(String id, State status, String stateVersion, String lastSeq, String lastCustomerSeq,
-                  String readSeq, boolean canReply, boolean canReturn, boolean canClose,
+                  String readSeq, boolean canReply, boolean canReturn, boolean canTransfer, boolean canClose,
                   String assignee, Boolean customerOnline) {}
     record Cursor(LocalDateTime time, String id) {}
     record Outbox(long id, long tenantId, String conversationId, Long sequence, int attempts) {}

@@ -1,22 +1,27 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
 import { responseError } from './api';
 import { SessionError, type BrowserSession, type SessionSide } from './web-session';
 
 type Status = 'WAITING' | 'ACTIVE' | 'CLOSED';
 type View = 'CURRENT' | 'HISTORY' | 'PENDING' | 'MINE' | 'CLOSED' | 'DEPARTMENT';
-type Operation = 'claim' | 'return' | 'close';
+type Operation = 'claim' | 'return' | 'transfer' | 'close';
 type ConversationRef = { id: string; status: Status; stateVersion: string; lastCustomerSeq: string };
 type ListItem = ConversationRef & { preview: string | null; unread: number; timestamp: string };
 type Detail = ConversationRef & {
-  readSeq: string; canReply: boolean; canReturn: boolean; canClose: boolean;
+  readSeq: string; canReply: boolean; canReturn: boolean; canTransfer: boolean; canClose: boolean;
   assignee: string | null; customerOnline: boolean | null;
 };
 type ChatMessage = { conversationId: string; seq: string; sender: 'CUSTOMER' | 'STAFF'; text: string };
 type MessagePage = { items: ChatMessage[]; hasMore: boolean };
 type ConversationPage = { items: ListItem[]; nextCursor: string | null };
 type Counts = { pending: number; unread: number };
-type ServerHistory = { action: 'CLAIM' | 'RETURN' | 'CLOSE'; operator: string; occurredAt: string; reason: string | null };
+type StaffOption = { id: string; displayName: string; email: string };
+type ServerHistory = {
+  action: 'CLAIM' | 'RETURN' | 'TRANSFER' | 'CLOSE'; operator: string; occurredAt: string; reason: string | null;
+  previousAssignee: StaffOption | null; newAssignee: StaffOption | null;
+};
+type TransferDraft = { row: ConversationRef; candidates?: StaffOption[] };
 type Ticket = { sessionId: string; ticket: string };
 type Ack = { message: ChatMessage };
 type SendAttempt = { id: string | null; text: string; clientMessageId: string };
@@ -38,10 +43,11 @@ if (canQueue) views.push(['PENDING', '待领取'], ['MINE', '我负责'], ['CLOS
 if (canSupervise) views.push(['DEPARTMENT', '部门会话']);
 
 const labels: Record<Status, string> = { WAITING: '等待客服', ACTIVE: '客服已接入', CLOSED: '已结束' };
-const historyLabels = { CLAIM: '领取', RETURN: '退回队列', CLOSE: '结束' };
+const historyLabels = { CLAIM: '领取', RETURN: '退回队列', TRANSFER: '转派', CLOSE: '结束' };
 const errorMessages = new Map([
   ['STATE_VERSION_CHANGED', '会话已变化，已刷新最新状态。'],
   ['ALREADY_CLAIMED', '已被其他客服领取。'],
+  ['ALREADY_ASSIGNED', '该客服已负责本会话，请重新选择。'],
   ['NEW_CUSTOMER_MESSAGES', '客户有新留言，请阅读后重新确认结束。'],
   ['CONVERSATION_CLOSED', '此会话已结束。可保留文字，手动发起新会话。'],
   ['NOT_FOUND', '当前无法访问此会话。'],
@@ -64,6 +70,9 @@ const log = ref<HTMLOListElement>();
 const summary = ref('');
 const connection = ref('正在连接聊天…');
 const notice = ref('');
+const transfer = shallowRef<TransferDraft>();
+const transferTarget = ref('');
+const transferring = ref(false);
 const canReply = computed(() => detail.value?.canReply || (customer && view.value === 'CURRENT' && !selection.value));
 const meta = computed(() => detail.value?.status === 'WAITING' && customer ? '可继续留言，稍后回来查看回复。'
   : detail.value?.customerOnline === true ? '客户在线' : detail.value?.customerOnline === false ? '客户离线' : '');
@@ -112,6 +121,7 @@ function select(id: string | null, preserveDraft = false) {
   reading = null;
   if (history.value) history.value.open = false;
   historyRows.value = [];
+  transfer.value = undefined;
   if (!preserveDraft) { draft.value = ''; sendAttempt = null; }
 }
 
@@ -227,17 +237,17 @@ async function markRead() {
   finally { if (reading === call) reading = null; }
 }
 
-async function perform(operation: Operation, row: ConversationRef) {
+async function perform(operation: Operation, row: ConversationRef, targetStaffId?: string) {
   if (operation === 'close' && !window.confirm('结束这段会话？')) return;
   if (operation === 'return' && !window.confirm('将这段会话退回本部门队列？')) return;
   if (operation === 'close') await markRead();
-  const key = [operation, row.id, row.stateVersion, row.lastCustomerSeq].join(':');
+  const key = [operation, row.id, row.stateVersion, row.lastCustomerSeq, targetStaffId].join(':');
   const actionId = actionKeys.get(key) ?? crypto.randomUUID();
   actionKeys.set(key, actionId);
   try {
     await api(`/conversations/${row.id}/${operation}`, {
       method: 'POST',
-      body: JSON.stringify({ actionId, stateVersion: row.stateVersion,
+      body: JSON.stringify({ actionId, stateVersion: row.stateVersion, targetStaffId,
         ...(operation === 'close' ? { observedCustomerSeq: row.lastCustomerSeq } : {}) }),
     });
     if (closed) return;
@@ -246,11 +256,44 @@ async function perform(operation: Operation, row: ConversationRef) {
     if (operation === 'claim') { changeView('MINE'); select(row.id); }
     if (operation === 'return') select(null);
     if (operation === 'close') { changeView('CLOSED'); select(row.id); }
+    if (operation === 'transfer') notice.value = '会话已转派。';
+    return true;
   } catch (error) {
     if (error instanceof SessionError && error.status < 500) actionKeys.delete(key);
     showError(error);
+    return error instanceof SessionError && error.status < 500;
+  } finally {
+    void sync();
   }
-  void sync();
+}
+
+const staffLabel = (staff: StaffOption) => `${staff.displayName}（${staff.email}）`;
+
+async function openTransfer(row: ConversationRef) {
+  const current: TransferDraft = { row };
+  transfer.value = current;
+  transferTarget.value = '';
+  notice.value = '';
+  try {
+    const candidates = await api<StaffOption[]>(`/conversations/${row.id}/transfer-candidates`);
+    if (transfer.value === current && !closed) transfer.value = { row, candidates };
+  } catch (error) {
+    if (transfer.value !== current) return;
+    transfer.value = undefined;
+    showError(error);
+  }
+}
+
+async function submitTransfer() {
+  const current = transfer.value;
+  if (!current?.candidates?.some(({ id }) => id === transferTarget.value) || transferring.value) return;
+  transferring.value = true;
+  try {
+    const finished = await perform('transfer', current.row, transferTarget.value);
+    if (finished && transfer.value === current) transfer.value = undefined;
+  } finally {
+    transferring.value = false;
+  }
 }
 
 function retrySocket() {
@@ -389,6 +432,18 @@ async function loadHistory() {
   } catch (error) { showError(error); }
 }
 
+function historyText(entry: ServerHistory) {
+  const change = entry.previousAssignee && entry.newAssignee
+    ? `${staffLabel(entry.previousAssignee)} → ${staffLabel(entry.newAssignee)}` : '';
+  return [historyLabels[entry.action], entry.operator, change, new Date(entry.occurredAt).toLocaleString(), entry.reason]
+    .filter(Boolean).join(' · ');
+}
+
+watch(() => detail.value?.stateVersion, () => {
+  if (!detail.value?.canTransfer) transfer.value = undefined;
+  void loadHistory();
+});
+
 function onVisible() { if (!document.hidden) void sync(); }
 
 function invalidate() {
@@ -449,9 +504,24 @@ onUnmounted(dispose);
         <p class="chat-assignee">{{ detail?.assignee ? `负责人 ${detail.assignee}` : '' }}</p>
         <div class="chat-actions">
           <button v-if="detail?.canReturn" type="button" @click="perform('return', detail)">退回队列</button>
+          <button v-if="detail?.canTransfer && !transfer" type="button" @click="openTransfer(detail)">转派会话</button>
           <button v-if="detail?.canClose" type="button" @click="perform('close', detail)">结束会话</button>
           <button v-if="customer && detail?.status === 'CLOSED'" type="button" @click="changeView('CURRENT', true)">发起新会话</button>
         </div>
+        <form v-if="transfer && detail?.canTransfer" class="chat-transfer" @submit.prevent="submitTransfer">
+          <p v-if="!transfer.candidates" aria-live="polite">正在加载同部门客服…</p>
+          <p v-else-if="!transfer.candidates.length">暂无可接手的同部门客服。</p>
+          <label v-else>接手客服
+            <select v-model="transferTarget" required :disabled="transferring">
+              <option value="" disabled>选择同部门客服</option>
+              <option v-for="staff in transfer.candidates" :key="staff.id" :value="staff.id">{{ staffLabel(staff) }}</option>
+            </select>
+          </label>
+          <div class="chat-actions">
+            <button v-if="transfer.candidates?.length" type="submit" :disabled="!transferTarget || transferring">确认转派</button>
+            <button type="button" :disabled="transferring" @click="transfer = undefined">取消</button>
+          </div>
+        </form>
         <button v-if="hasOlder" type="button" class="chat-older" @click="loadOlderMessages">加载早前消息</button>
         <ol ref="log" class="chat-log" aria-label="消息" tabindex="0" @scroll="markRead">
           <li v-for="message in visibleMessages" :key="message.seq" :data-seq="message.seq">
@@ -467,7 +537,7 @@ onUnmounted(dispose);
           <summary>操作记录</summary>
           <ol>
             <li v-for="(entry, index) in historyRows" :key="index">
-              {{ [historyLabels[entry.action], entry.operator, new Date(entry.occurredAt).toLocaleString(), entry.reason].filter(Boolean).join(' · ') }}
+              {{ historyText(entry) }}
             </li>
           </ol>
         </details>

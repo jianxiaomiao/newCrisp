@@ -14,6 +14,11 @@ import org.springframework.stereotype.Repository;
 
 @Repository
 class ChatStore {
+    private static final String DEPARTMENT_AGENTS = """
+            SELECT a.id, a.display_name, a.email FROM staff_department_role r
+            JOIN staff_account a ON a.tenant_id = r.tenant_id AND a.id = r.staff_id
+            WHERE r.tenant_id = ? AND r.department_id = ? AND r.role_code = 'AGENT' AND a.enabled
+            """;
     private final JdbcClient jdbc;
     private final CustomerUnread customerUnread;
 
@@ -28,10 +33,14 @@ class ChatStore {
     }
 
     boolean lockStaffAccess(Actor actor) {
+        return lockActiveStaff(actor.tenantId(), actor.id())
+                .filter(version -> version == actor.accessVersion()).isPresent();
+    }
+
+    private Optional<Long> lockActiveStaff(long tenant, String staffId) {
         return jdbc.sql("""
                 SELECT access_version FROM staff_account WHERE tenant_id = ? AND id = ? AND enabled FOR SHARE
-                """).params(actor.tenantId(), actor.id()).query(Long.class).optional()
-                .filter(version -> version == actor.accessVersion()).isPresent();
+                """).params(tenant, staffId).query(Long.class).optional();
     }
 
     Optional<Conversation> active(Actor actor) {
@@ -168,11 +177,26 @@ class ChatStore {
                 chat.tenantId(), chat.id()).update();
     }
 
+    List<StaffOption> transferCandidates(Conversation chat) {
+        return jdbc.sql(DEPARTMENT_AGENTS + " AND a.id <> ? ORDER BY a.display_name, a.email")
+                .params(chat.tenantId(), chat.departmentId(), chat.assigneeId())
+                .query((rs, row) -> new StaffOption(rs.getString("id"), rs.getString("display_name"), rs.getString("email"))).list();
+    }
+
+    boolean lockTransferTarget(Conversation chat, String staffId) {
+        // Role edits lock this same account before deleting or inserting department grants.
+        if (lockActiveStaff(chat.tenantId(), staffId).isEmpty()) return false;
+        return jdbc.sql("""
+                SELECT staff_id FROM staff_department_role
+                WHERE tenant_id = ? AND staff_id = ? AND department_id = ? AND role_code = 'AGENT'
+                """).params(chat.tenantId(), staffId, chat.departmentId()).query(String.class).optional().isPresent();
+    }
+
     Optional<ActionRecord> action(Actor actor, String id) {
         return jdbc.sql("SELECT * FROM conversation_action WHERE tenant_id = ? AND staff_id = ? AND action_id = ?")
                 .params(actor.tenantId(), actor.id(), id).query((rs, row) -> new ActionRecord(rs.getString("conversation_id"),
                     Operation.valueOf(rs.getString("action_code")), rs.getLong("expected_version"),
-                    rs.getObject("observed_customer_seq", Long.class), rs.getString("reason"))).optional();
+                    rs.getObject("observed_customer_seq", Long.class), rs.getString("reason"), rs.getString("new_assignee"))).optional();
     }
 
     void recordAction(Conversation chat, Actor staff, String id, Operation op, Long seen, String reason, String owner, LocalDateTime now) {
@@ -197,12 +221,23 @@ class ChatStore {
 
     List<ActionHistory> history(Conversation chat) {
         return jdbc.sql("""
-                SELECT a.action_code, s.display_name, a.created_at, a.reason FROM conversation_action a
+                SELECT a.action_code, s.display_name, a.created_at, a.reason,
+                       p.id AS previous_id, p.display_name AS previous_name, p.email AS previous_email,
+                       n.id AS new_id, n.display_name AS new_name, n.email AS new_email
+                FROM conversation_action a
                 JOIN staff_account s ON s.tenant_id = a.tenant_id AND s.id = a.staff_id
+                LEFT JOIN staff_account p ON p.tenant_id = a.tenant_id AND p.id = a.previous_assignee AND a.action_code = 'TRANSFER'
+                LEFT JOIN staff_account n ON n.tenant_id = a.tenant_id AND n.id = a.new_assignee AND a.action_code = 'TRANSFER'
                 WHERE a.tenant_id = ? AND a.conversation_id = ? ORDER BY a.expected_version DESC LIMIT 100
                 """).params(chat.tenantId(), chat.id()).query((rs, row) -> new ActionHistory(
                 Operation.valueOf(rs.getString("action_code")), rs.getString("display_name"),
-                rs.getObject("created_at", LocalDateTime.class) + "Z", rs.getString("reason"))).list();
+                rs.getObject("created_at", LocalDateTime.class) + "Z", rs.getString("reason"),
+                historyAssignee(rs, "previous"), historyAssignee(rs, "new"))).list();
+    }
+
+    private static StaffOption historyAssignee(ResultSet rs, String prefix) throws SQLException {
+        String id = rs.getString(prefix + "_id");
+        return id == null ? null : new StaffOption(id, rs.getString(prefix + "_name"), rs.getString(prefix + "_email"));
     }
 
     List<Outbox> ready(LocalDateTime now) {
