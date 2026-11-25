@@ -237,10 +237,12 @@ test.describe('Nexus login against isolated MySQL', () => {
 
     try {
       const [admin, otherAdmin] = await Promise.all([open(first), open(second)]);
+      await admin.getByRole('button', { name: '新增部门' }).click();
       await admin.getByLabel('新部门代码').fill('billing');
       await admin.getByLabel('部门名称', { exact: true }).fill('账单组');
       await admin.getByRole('button', { name: '创建部门' }).click();
       await expect(admin.getByRole('status')).toHaveText('部门已创建。');
+      await admin.getByText('调整部门', { exact: true }).click();
       const billingRow = admin.getByRole('list', { name: '部门', exact: true }).getByRole('listitem').filter({ hasText: '账单组（billing）' });
       await billingRow.getByText('调整 账单组（billing）', { exact: true }).click();
       await billingRow.getByLabel('部门新名称').fill('账单支持');
@@ -250,11 +252,14 @@ test.describe('Nexus login against isolated MySQL', () => {
 
       await createMember(admin, agentEmail, password, 'AGENT');
       await createMember(otherAdmin, otherEmail, password, 'AGENT');
-      const managedRow = admin.getByRole('list', { name: '员工' }).getByRole('listitem').filter({ hasText: agentEmail });
+      const managedRow = admin.getByRole('row').filter({ hasText: agentEmail });
+      const roleEditor = admin.getByRole('form', { name: '调整部门角色' });
       await managedRow.getByText('调整角色', { exact: true }).click();
-      await managedRow.getByLabel('账单支持（billing） · 客服', { exact: true }).check();
-      await managedRow.getByLabel('账单支持（billing） · 主管', { exact: true }).check();
-      await managedRow.getByRole('button', { name: '保存角色' }).click();
+      await roleEditor.getByText('账单支持（billing） · 客服', { exact: true }).click();
+      await expect(roleEditor.getByRole('checkbox', { name: '账单支持（billing） · 客服', exact: true })).toBeChecked();
+      await roleEditor.getByText('账单支持（billing） · 主管', { exact: true }).click();
+      await expect(roleEditor.getByRole('checkbox', { name: '账单支持（billing） · 主管', exact: true })).toBeChecked();
+      await roleEditor.getByRole('button', { name: '保存角色' }).click();
       await expect(admin.getByRole('status')).toHaveText('部门角色已更新。');
       const departments = (await browserApi(admin, `${staff}/departments`)).data;
       const billing = departments.find(({ code }) => code === 'billing');
@@ -307,8 +312,9 @@ test.describe('Nexus login against isolated MySQL', () => {
       await expect.poll(() => socketState(agent, openProbe)).toMatchObject({ ready: true, closed: null });
 
       await managedRow.getByText('调整角色', { exact: true }).click();
-      await managedRow.getByLabel('客户支持（support） · 客服', { exact: true }).uncheck();
-      await managedRow.getByRole('button', { name: '保存角色' }).click();
+      await roleEditor.getByText('客户支持（support） · 客服', { exact: true }).click();
+      await expect(roleEditor.getByRole('checkbox', { name: '客户支持（support） · 客服', exact: true })).not.toBeChecked();
+      await roleEditor.getByRole('button', { name: '保存角色' }).click();
       await expect(admin.getByRole('status')).toHaveText('部门角色已更新。');
       await expect.poll(() => socketState(agent, openProbe)).toEqual({ ready: true, closed: 4003 });
       const staleProbe = await watchStaffSocket(agent, oldTicket);
@@ -338,14 +344,14 @@ test.describe('Nexus login against isolated MySQL', () => {
       const independentLogin = await open(first, agentEmail, password);
       const independentProbe = await watchStaffSocket(independentLogin);
       await expect.poll(() => socketState(independentLogin, independentProbe)).toMatchObject({ ready: true, closed: null });
-      admin.once('dialog', (dialog) => dialog.accept());
       await managedRow.getByRole('button', { name: '停用账号' }).click();
+      await admin.getByRole('dialog', { name: '停用账号' }).getByRole('button', { name: '确定', exact: true }).click();
       await expect(managedRow.getByText('已停用', { exact: true })).toBeVisible();
       for (const [tab, probe] of [[agent, currentProbe], [independentLogin, independentProbe]]) {
         await expect.poll(async () => [4004, 1008].includes((await socketState(tab, probe)).closed)).toBe(true);
       }
       for (const tab of [agent, secondTab, independentLogin]) {
-        await expect(tab.getByRole('heading', { name: '租户管理员登录' })).toBeVisible();
+        await expect(tab.getByRole('heading', { name: '登录工作台' })).toBeVisible();
         await expect(tab.getByRole('button', { name: '待领取' })).toHaveCount(0);
       }
       expect((await request.get(`${staff}/me`, { headers: { Authorization: `Bearer ${oldAccess}` } })).status()).toBe(401);
@@ -768,7 +774,7 @@ test.describe('Nexus login against isolated MySQL', () => {
       expect((await browserApi(waiting, `${chats}/${foreignId}`)).status).toBe(404);
 
       const returning = await staffPage(tenantA, agentTwo, password);
-      const queued = returning.getByRole('listitem').filter({ hasText: '本部门无人在线，等待人工领取' });
+      const queued = returning.getByRole('row').filter({ hasText: '本部门无人在线，等待人工领取' });
       await expect(queued.getByRole('button', { name: '领取', exact: true })).toBeVisible();
       await queued.getByRole('button', { name: '领取', exact: true }).click();
       await expect(waiting.locator('.chat-assignee')).toHaveText('负责人 甲二号');
@@ -881,6 +887,7 @@ async function redeem(request, grant, origin = nexusOrigin) {
 }
 
 async function createMember(page, email, password, role) {
+  await page.getByRole('button', { name: '新增员工' }).click();
   await page.getByLabel('成员邮箱').fill(email);
   await page.getByLabel('初始密码').fill(password);
   await page.getByLabel('职责').selectOption(role);

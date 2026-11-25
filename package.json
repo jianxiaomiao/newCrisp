@@ -10,6 +10,8 @@
     "test:e2e": "bash scripts/test-e2e.sh"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "2.3.2",
+    "element-plus": "2.14.7",
     "vue": "3.5.42"
   },
   "devDependencies": {

@@ -15,3 +15,17 @@ test('the application is ready after Flyway creates the tenant table in MySQL', 
 
   expect(results.trim().split(/\r?\n/)).toEqual([...Array.from({ length: 9 }, (_, i) => `${i + 1}\t1`), '1']);
 });
+
+test('the packaged Vue entry pages load the theme and fit a phone viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  for (const entry of ['/staff.html', '/customer.html']) {
+    await page.goto(entry);
+    await expect(page.locator('link[rel="stylesheet"][href^="/assets/"]')).toHaveCount(1);
+    await expect(page.locator('html')).toHaveCSS('--el-color-primary', '#276b58');
+    await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(244, 246, 239)');
+    if (entry === '/staff.html') {
+      await expect(page.getByRole('button', { name: '登录', exact: true })).toHaveCSS('background-color', 'rgb(39, 107, 88)');
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  }
+});

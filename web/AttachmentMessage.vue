@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onUnmounted, ref } from 'vue';
+import { Document, Picture } from '@element-plus/icons-vue';
 
-const props = defineProps<{ name: string; type: string; getFile: () => Promise<Blob> }>();
+const props = defineProps<{ name: string; type: string; size: number; getFile: () => Promise<Blob> }>();
 const preview = ref('');
 const failure = ref('');
 const busy = ref(false);
@@ -39,12 +40,17 @@ onUnmounted(() => {
 
 <template>
   <div class="attachment-message">
-    <span>{{ name }}</span>
-    <button v-if="type.startsWith('image/')" type="button" :disabled="busy" @click="open(false)">预览图片</button>
-    <button v-else-if="!preview && type === 'application/pdf'" type="button" :disabled="busy" @click="open(false)">准备 PDF 预览</button>
-    <button type="button" :disabled="busy" @click="open(true)">下载附件</button>
+    <div class="file-title">
+      <span class="file-icon" aria-hidden="true"><el-icon><component :is="type.startsWith('image/') ? Picture : Document" /></el-icon></span>
+      <span><strong>{{ name }}</strong><small>{{ Math.max(1, Math.round(size / 1024)) }} KB</small></span>
+    </div>
+    <div class="inline-actions">
+      <el-button v-if="type.startsWith('image/')" link type="primary" :disabled="busy" @click="open(false)">预览图片</el-button>
+      <el-button v-else-if="!preview && type === 'application/pdf'" link type="primary" :disabled="busy" @click="open(false)">准备 PDF 预览</el-button>
+      <el-button link type="primary" :disabled="busy" @click="open(true)">下载附件</el-button>
+    </div>
     <img v-if="preview && type.startsWith('image/')" :src="preview" :alt="name">
     <a v-else-if="preview" :href="preview" target="_blank" rel="noopener noreferrer">在新标签页预览 PDF</a>
-    <p v-if="failure" aria-live="polite">{{ failure }}</p>
+    <p v-if="failure" class="feedback" aria-live="polite">{{ failure }}</p>
   </div>
 </template>

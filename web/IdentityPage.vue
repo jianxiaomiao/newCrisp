@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, shallowRef } from 'vue';
+import { ArrowLeft, ChatDotRound, CircleCheck, Connection, Document, Grid, Link, Lock, Setting, SwitchButton, User } from '@element-plus/icons-vue';
+import BrandMark from './BrandMark.vue';
 import ChatPanel from './ChatPanel.vue';
 import TenantManagement from './TenantManagement.vue';
 import SupportAdmin from './SupportAdmin.vue';
@@ -28,14 +30,24 @@ const signingOut = ref(false);
 const linkingGuest = ref(false);
 const guestCode = ref('');
 const guestNotice = ref('');
+const adminViews = [
+  { id: 'rules', label: '接待规则', icon: Setting },
+  { id: 'replies', label: '共享快捷回复', icon: Document },
+  { id: 'sites', label: '访客入口', icon: Link },
+  { id: 'management', label: '租户管理', icon: Grid },
+] as const;
+const adminView = ref<(typeof adminViews)[number]['id']>('management');
+const canGoBack = window.history.length > 1;
+const goBack = () => window.history.back();
 const credentials = reactive({ tenantCode: '', email: '', password: '' });
 const staff = computed(() => {
   const profile = visit.value?.user;
   return profile && 'staffId' in profile ? profile : undefined;
 });
 const admin = computed(() => staff.value?.role === 'TENANT_ADMIN');
-const heading = computed(() => customer ? '在线客服'
-  : !staff.value ? '租户管理员登录' : admin.value ? '租户管理' : '客服工作台');
+const workspaceTitle = computed(() => admin.value
+  ? adminViews.find(({ id }) => id === adminView.value)?.label ?? '租户管理'
+  : '客服工作台');
 const chat = computed(() => {
   const current = visit.value;
   if (!current) return;
@@ -68,6 +80,7 @@ async function refreshProfile() {
     const user: Visit['user'] = await response.json();
     const sid = auth.currentId();
     if (current !== revision || !sid) return;
+    if (visit.value?.sid !== sid) adminView.value = 'management';
     if (visit.value && visit.value.sid !== sid) {
       guestCode.value = '';
       guestNotice.value = '';
@@ -168,42 +181,107 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main>
-    <h1 id="heading">{{ heading }}</h1>
-    <p id="feedback" role="status" aria-live="polite">{{ feedback }}</p>
-    <form v-if="showLogin" @submit.prevent="login">
-      <label>租户代码<input v-model="credentials.tenantCode" required autocomplete="organization" pattern="[a-z][a-z0-9\-]{2,47}"></label>
-      <label>邮箱<input v-model="credentials.email" required type="email" autocomplete="username" maxlength="254"></label>
-      <label>密码<input v-model="credentials.password" required type="password" autocomplete="current-password" maxlength="72"></label>
-      <button type="submit" :disabled="signingIn">登录</button>
-    </form>
-    <section v-if="visit" id="profile" :aria-label="customer ? '客户身份' : undefined" :aria-labelledby="customer ? undefined : 'heading'">
-      <p>{{ visit.user.tenantName }}</p>
-      <p v-if="staff">{{ staff.email }}</p>
-      <button type="button" :disabled="signingOut" @click="logout">{{ customer ? '退出客服' : '退出登录' }}</button>
+  <div v-if="customer" class="customer-shell">
+    <header class="consumer-bar">
+      <div class="consumer-bar-inner">
+        <BrandMark />
+        <span v-if="visit" class="consumer-tenant">{{ visit.user.tenantName }}</span>
+        <div class="consumer-actions">
+          <el-button v-if="canGoBack" :icon="ArrowLeft" @click="goBack">返回上一页</el-button>
+          <el-button v-if="visit" :icon="SwitchButton" :disabled="signingOut" @click="logout">退出客服</el-button>
+        </div>
+      </div>
+    </header>
+    <main class="customer-main">
+      <header class="customer-heading">
+        <h1>在线客服</h1>
+        <span class="identity" role="status" aria-live="polite"><el-icon v-if="visit"><CircleCheck /></el-icon>{{ feedback }}</span>
+      </header>
+      <ChatPanel v-if="chat && visit" :key="chat.sid" v-bind="chat" @expired="recheckAccess">
+        <template #sidebar>
+          <details class="customer-resume">
+            <summary><el-icon><Connection /></el-icon>接续访客对话</summary>
+            <form class="field-stack" @submit.prevent="linkGuest">
+              <label>访客接续码
+                <el-input v-model="guestCode" required maxlength="90" autocomplete="off" aria-label="访客接续码" />
+              </label>
+              <el-button native-type="submit" type="primary" :disabled="linkingGuest">接续访客会话</el-button>
+            </form>
+          </details>
+          <p v-if="guestNotice" class="feedback" aria-live="polite">{{ guestNotice }}</p>
+        </template>
+      </ChatPanel>
+    </main>
+  </div>
+
+  <main v-else-if="!visit" class="signin-shell">
+    <section class="signin surface">
+      <div class="signin-brand">
+        <BrandMark />
+        <div class="brand-art" aria-hidden="true">
+          <span class="orbit"></span><span class="orbit orbit-two"></span><span class="orbit orbit-three"></span>
+          <span class="art-bubble art-back"><el-icon><ChatDotRound /></el-icon></span>
+          <span class="art-bubble art-front"><el-icon><ChatDotRound /></el-icon></span>
+        </div>
+        <div class="signin-intro"><strong>客服工作台</strong><p>登录你的租户，领取会话并回复客户。</p></div>
+      </div>
+      <div class="signin-form">
+        <h1 id="heading">登录工作台</h1>
+        <p class="feedback" role="status" aria-live="polite">{{ feedback }}</p>
+        <form v-if="showLogin" class="field-stack" @submit.prevent="login">
+          <label>租户代码
+            <el-input v-model="credentials.tenantCode" aria-label="租户代码" required autocomplete="organization" pattern="[a-z][a-z0-9\-]{2,47}" :prefix-icon="Grid" placeholder="例如：qinghe" />
+          </label>
+          <label>邮箱
+            <el-input v-model="credentials.email" aria-label="邮箱" required type="email" autocomplete="username" maxlength="254" :prefix-icon="User" placeholder="输入工作邮箱" />
+          </label>
+          <label>密码
+            <el-input v-model="credentials.password" aria-label="密码" required type="password" autocomplete="current-password" maxlength="72" :prefix-icon="Lock" show-password placeholder="输入密码" />
+          </label>
+          <el-button class="login-submit" native-type="submit" type="primary" :loading="signingIn">登录</el-button>
+        </form>
+      </div>
     </section>
-    <details v-if="visit && customer">
-      <summary>接续访客对话</summary>
-      <form @submit.prevent="linkGuest">
-        <label>访客接续码<input v-model="guestCode" required maxlength="90" autocomplete="off"></label>
-        <button type="submit" :disabled="linkingGuest">接续访客会话</button>
-      </form>
-    </details>
-    <p v-if="visit && customer && guestNotice" aria-live="polite">{{ guestNotice }}</p>
-    <TenantManagement
-      v-if="visit && admin"
-      :key="visit.sid"
-      :sid="visit.sid"
-      @notice="feedback = $event"
-      @expired="recheckAccess"
-    />
-    <SupportAdmin v-if="visit && admin" :key="visit.sid" :sid="visit.sid" @expired="recheckAccess" />
-    <p v-if="staff && !admin && !chat">暂无部门权限，请联系租户管理员。</p>
-    <ChatPanel
-      v-if="chat"
-      :key="`${chat.sid}:${chat.accessVersion ?? ''}`"
-      v-bind="chat"
-      @expired="recheckAccess"
-    />
   </main>
+
+  <div v-else class="staff-shell">
+    <aside class="rail">
+      <BrandMark />
+      <div class="workspace">
+        <el-avatar :size="36">{{ visit.user.tenantName.charAt(0) }}</el-avatar>
+        <div><strong>{{ visit.user.tenantName }}</strong><small>客服工作空间</small></div>
+      </div>
+      <nav class="rail-nav" aria-label="工作空间">
+        <template v-if="admin">
+          <el-button v-for="item in adminViews" :key="item.id" :icon="item.icon"
+            :aria-current="adminView === item.id ? 'page' : undefined"
+            @click="adminView = item.id; feedback = ''">{{ item.label }}</el-button>
+        </template>
+        <el-button v-else :icon="ChatDotRound" aria-current="page">会话工作台</el-button>
+      </nav>
+      <div v-if="staff" class="staff-profile">
+        <el-avatar :size="34">{{ staff.email.charAt(0).toUpperCase() }}</el-avatar>
+        <div class="staff-profile-copy" :title="staff.email"><strong>{{ staff.email }}</strong><small>{{ admin ? '租户管理员' : staff.canSupervise ? '部门主管' : '客服' }}</small></div>
+      </div>
+    </aside>
+
+    <main class="desk">
+      <div class="topbar">
+        <span class="breadcrumb"><span>工作空间</span><span aria-hidden="true">›</span><strong>{{ workspaceTitle }}</strong></span>
+        <el-button :icon="SwitchButton" :disabled="signingOut" @click="logout">退出登录</el-button>
+      </div>
+      <header class="desk-heading">
+        <h1 id="heading">{{ workspaceTitle }}</h1>
+        <p v-if="!admin">领取、回复并跟进客户会话</p>
+      </header>
+      <p class="feedback" role="status" aria-live="polite">{{ feedback }}</p>
+      <template v-if="admin">
+        <TenantManagement v-show="adminView === 'management'" :key="`management:${visit.sid}`" :sid="visit.sid"
+          @notice="feedback = $event" @expired="recheckAccess" />
+        <SupportAdmin v-show="adminView !== 'management'" :key="`support:${visit.sid}`" :sid="visit.sid" :view="adminView === 'management' ? 'rules' : adminView" @expired="recheckAccess" />
+      </template>
+      <p v-else-if="staff && !chat" class="surface empty-state">暂无部门权限，请联系租户管理员。</p>
+      <ChatPanel v-if="chat" :key="`${chat.sid}:${chat.accessVersion ?? ''}`" v-bind="chat" @expired="recheckAccess" />
+    </main>
+  </div>
 </template>

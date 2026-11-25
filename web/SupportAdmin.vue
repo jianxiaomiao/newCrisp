@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from 'vue';
+import { onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { Check, Document, Link } from '@element-plus/icons-vue';
+import { confirmAction } from './confirmation';
 import { responseError } from './api';
 import { SessionError, webSession } from './web-session';
 
@@ -8,7 +10,7 @@ type Site = { id: string; title: string; origin: string; enabled: boolean };
 type Hours = { day: number; start: string; end: string };
 type Settings = { zone: string; windows: Hours[] | null; maxActive: number | null; fillQueue: boolean };
 
-const { sid } = defineProps<{ sid: string }>();
+const { sid, view } = defineProps<{ sid: string; view: 'rules' | 'replies' | 'sites' }>();
 const emit = defineEmits<{ expired: [] }>();
 const auth = webSession('staff');
 const abort = new AbortController();
@@ -109,8 +111,8 @@ function saveSite() {
   }, '访客入口已创建。');
 }
 
-function disableSite(id: string) {
-  if (!window.confirm('停用此访客入口？')) return;
+async function disableSite(id: string) {
+  if (busy.value || !await confirmAction('停用入口', '停用后，访客将无法通过此入口进入客服。') || abort.signal.aborted) return;
   void run(async () => {
     await request(`/guest-sites/${id}`, 'DELETE');
     sites.value = await (await request('/guest-sites')).json();
@@ -121,63 +123,113 @@ function embedCode(entry: Site) {
   return `<iframe src="${window.location.origin}/embed/${entry.id}" title="在线客服" width="420" height="600"></iframe>`;
 }
 
+watch(() => view, () => { notice.value = ''; });
 onMounted(() => void run(async () => { await load(); loaded.value = true; }, ''));
 onUnmounted(() => abort.abort());
 </script>
 
 <template>
   <section class="support-admin" aria-label="客服配置">
-    <p aria-live="polite">{{ notice }}</p>
-    <details>
-      <summary>接待规则</summary>
-      <form v-if="loaded" @submit.prevent="saveSettings">
-        <label>自动分配上限<input v-model="config.maxActive" type="number" min="1" max="1000" placeholder="不限"></label>
-        <label class="check-line"><input v-model="config.fillQueue" type="checkbox">启用待领取自动补派</label>
-        <label class="check-line"><input v-model="config.enabled" type="checkbox">启用营业时间</label>
-        <template v-if="config.enabled">
-          <label>营业时区<input v-model="config.zone" required maxlength="64"></label>
-          <div v-for="entry in schedule" :key="entry.day" class="schedule-row">
-            <label class="check-line"><input v-model="entry.enabled" type="checkbox">{{ entry.label }}</label>
-            <label v-if="entry.enabled">开始<input v-model="entry.start" required type="time"></label>
-            <label v-if="entry.enabled">结束<input v-model="entry.end" required type="time"></label>
-          </div>
-        </template>
-        <button :disabled="busy">保存接待规则</button>
+    <p class="feedback" aria-live="polite">{{ notice }}</p>
+    <p v-if="!loaded && busy" class="surface empty-state">正在加载客服配置…</p>
+    <template v-if="loaded">
+      <form v-if="view === 'rules'" class="rules-form" @submit.prevent="saveSettings">
+        <div class="rules-layout">
+          <section class="surface settings-card">
+            <header class="section-head"><div><h2>自动分配</h2><p>优先分配给同部门在线且进行中会话最少的客服。</p></div></header>
+            <div class="rules-row">
+              <label for="active-limit"><strong>自动分配上限</strong><small>每位客服可通过自动分配同时接待的会话数。</small></label>
+              <el-input id="active-limit" v-model="config.maxActive" type="number" min="1" max="1000" placeholder="不限" />
+            </div>
+            <div class="rules-row">
+              <div><strong>待领取自动补派</strong><small>客服恢复接单或释放名额时，优先分配等待最久的会话。</small></div>
+              <el-switch v-model="config.fillQueue" aria-label="启用待领取自动补派" />
+            </div>
+          </section>
+          <section class="surface settings-card">
+            <header class="section-head">
+              <div><h2>营业时间</h2><p>非营业时间可以继续留言，客户会看到下次接待时间。</p></div>
+              <el-switch v-model="config.enabled" aria-label="启用营业时间" />
+            </header>
+            <template v-if="config.enabled">
+              <div class="rules-row">
+                <label for="service-zone"><strong>营业时区</strong></label>
+                <el-input id="service-zone" v-model="config.zone" required maxlength="64" />
+              </div>
+              <div v-for="entry in schedule" :key="entry.day" class="schedule-row">
+                <el-checkbox v-model="entry.enabled">{{ entry.label }}</el-checkbox>
+                <template v-if="entry.enabled">
+                  <el-input v-model="entry.start" :aria-label="`${entry.label}开始`" required type="time" />
+                  <span>至</span>
+                  <el-input v-model="entry.end" :aria-label="`${entry.label}结束`" required type="time" />
+                </template>
+                <span v-else>休息</span>
+              </div>
+            </template>
+          </section>
+        </div>
+        <el-button native-type="submit" type="primary" :icon="Check" :disabled="busy">保存接待规则</el-button>
       </form>
-    </details>
-    <details>
-      <summary>共享快捷回复</summary>
-      <form v-if="loaded" @submit.prevent="saveReply">
-        <label>快捷回复标题<input v-model="reply.title" required maxlength="80"></label>
-        <label>快捷回复正文<textarea v-model="reply.body" required maxlength="4000"></textarea></label>
-        <button :disabled="busy">保存快捷回复</button>
-        <button v-if="reply.id" type="button" @click="clearReply">取消编辑</button>
-      </form>
-      <ul>
-        <li v-for="entry in replies" :key="entry.id">
-          {{ entry.title }}
-          <button type="button" :disabled="busy" @click="Object.assign(reply, entry)">编辑</button>
-          <button type="button" :disabled="busy" @click="deleteReply(entry.id)">删除</button>
-        </li>
-      </ul>
-    </details>
-    <details>
-      <summary>访客入口</summary>
-      <form v-if="loaded" @submit.prevent="saveSite">
-        <label>入口名称<input v-model="site.title" required maxlength="80"></label>
-        <label>允许嵌入的网站来源<input v-model="site.origin" required type="url" maxlength="255" placeholder="https://example.com"></label>
-        <button :disabled="busy">创建访客入口</button>
-      </form>
-      <ul>
-        <li v-for="entry in sites" :key="entry.id">
-          <p>{{ entry.title }} · {{ entry.origin }}</p>
-          <template v-if="entry.enabled">
-            <label>嵌入代码<textarea readonly :value="embedCode(entry)"></textarea></label>
-            <button type="button" :disabled="busy" @click="disableSite(entry.id)">停用入口</button>
-          </template>
-          <span v-else>已停用</span>
-        </li>
-      </ul>
-    </details>
+
+      <div v-else-if="view === 'replies'" class="settings-layout">
+        <section class="surface settings-card">
+          <div class="section-head"><h2>{{ reply.id ? '编辑快捷回复' : '新增快捷回复' }}</h2></div>
+          <form class="field-stack" @submit.prevent="saveReply">
+            <label>快捷回复标题<el-input v-model="reply.title" aria-label="快捷回复标题" required maxlength="80" /></label>
+            <label>快捷回复正文<el-input v-model="reply.body" aria-label="快捷回复正文" type="textarea" required maxlength="4000" :rows="5" /></label>
+            <div class="inline-actions">
+              <el-button native-type="submit" type="primary" :disabled="busy">保存快捷回复</el-button>
+              <el-button v-if="reply.id" :disabled="busy" @click="clearReply">取消编辑</el-button>
+            </div>
+          </form>
+        </section>
+        <section class="surface settings-card">
+          <div class="section-head"><h2>回复列表</h2></div>
+          <ul class="settings-list">
+            <li v-for="entry in replies" :key="entry.id">
+              <div class="settings-item">
+                <span class="file-icon"><el-icon><Document /></el-icon></span>
+                <div><strong>{{ entry.title }}</strong><p>{{ entry.body }}</p></div>
+                <div class="inline-actions">
+                  <el-button link type="primary" :disabled="busy" @click="Object.assign(reply, entry);">编辑</el-button>
+                  <el-button link type="danger" :disabled="busy" @click="deleteReply(entry.id)">删除</el-button>
+                </div>
+              </div>
+            </li>
+            <li v-if="!replies.length" class="list-empty">暂无快捷回复</li>
+          </ul>
+        </section>
+      </div>
+
+      <div v-else class="settings-layout">
+        <section class="surface settings-card">
+          <div class="section-head"><h2>创建访客入口</h2></div>
+          <form class="field-stack" @submit.prevent="saveSite">
+            <label>入口名称<el-input v-model="site.title" aria-label="入口名称" required maxlength="80" /></label>
+            <label>允许嵌入的网站来源
+              <el-input v-model="site.origin" aria-label="允许嵌入的网站来源" required type="url" maxlength="255" placeholder="https://example.com" />
+            </label>
+            <el-button native-type="submit" type="primary" :disabled="busy">创建访客入口</el-button>
+          </form>
+        </section>
+        <section class="surface settings-card">
+          <div class="section-head"><h2>访客入口列表</h2></div>
+          <ul class="settings-list">
+            <li v-for="entry in sites" :key="entry.id">
+              <div class="settings-item">
+                <span class="file-icon"><el-icon><Link /></el-icon></span>
+                <div><strong>{{ entry.title }}</strong><p>{{ entry.origin }}</p></div>
+                <el-tag size="small" round :class="entry.enabled ? 'tag-success' : 'tag-neutral'">{{ entry.enabled ? '启用中' : '已停用' }}</el-tag>
+              </div>
+              <div v-if="entry.enabled" class="field-stack site-embed">
+                <label>嵌入代码<el-input type="textarea" aria-label="嵌入代码" readonly :rows="3" :model-value="embedCode(entry)" /></label>
+                <el-button link type="danger" :disabled="busy" @click="disableSite(entry.id)">停用入口</el-button>
+              </div>
+            </li>
+            <li v-if="!sites.length" class="list-empty">暂无访客入口</li>
+          </ul>
+        </section>
+      </div>
+    </template>
   </section>
 </template>

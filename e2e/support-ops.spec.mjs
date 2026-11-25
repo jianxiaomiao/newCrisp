@@ -113,6 +113,7 @@ test('service rules, notifications, quick replies, attachments, and embedded gue
 
     const guestPage = await tab();
     const { guest, session } = await startGuest(guestPage, siteOrigin, site.id);
+    await expect(guest.locator('html')).toHaveCSS('--el-color-primary', '#276b58');
     await expect(guest.getByText(/非营业时间.*可以继续留言/)).toBeVisible();
     await expect(guest.getByText(/下次接待/)).toBeVisible();
     await guest.getByRole('textbox', { name: '消息' }).fill('访客一的订单');
@@ -164,7 +165,9 @@ test('service rules, notifications, quick replies, attachments, and embedded gue
     const path = `${adminApi}/conversations/${mine.id}`;
     const current = (await browserApi(employee, path)).data;
     expect(await apiWrite(employee, `${path}/read-position`, { stateVersion: current.stateVersion, upToSeq: current.lastSeq }, 'PUT')).toMatchObject({ status: 204 });
-    expect(await apiWrite(employee, `${path}/close`, { actionId: randomUUID(), stateVersion: current.stateVersion, observedCustomerSeq: current.lastCustomerSeq })).toMatchObject({ status: 200 });
+    await employee.getByRole('button', { name: '结束会话', exact: true }).click();
+    await employee.getByRole('dialog', { name: '结束会话' }).getByRole('button', { name: '确定', exact: true }).click();
+    await expect(employee.getByRole('heading', { name: '已结束', exact: true })).toBeVisible();
     await expect(nextGuest.locator('.chat-assignee')).toHaveText('负责人 一号客服');
   } finally {
     await Promise.all(contexts.map((context) => context.close()));

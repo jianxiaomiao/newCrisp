@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
+import { Bell, ChatDotRound, CircleCheck, Document, Headset, Paperclip, Promotion, Search, User } from '@element-plus/icons-vue';
 import { responseError } from './api';
+import { confirmAction } from './confirmation';
 import { SessionError, type SessionSide } from './web-session';
 import AttachmentMessage from './AttachmentMessage.vue';
 import { preferenceKey, staffNotification } from './staff-notifications';
@@ -15,7 +17,7 @@ type Detail = ConversationRef & {
   assignee: string | null; customerOnline: boolean | null; assigneeOnline: boolean | null; queuedAt: string;
 };
 type ChatMessage = {
-  conversationId: string; seq: string; sender: 'CUSTOMER' | 'STAFF'; text: string;
+  conversationId: string; seq: string; sender: 'CUSTOMER' | 'STAFF'; text: string; createdAt: string;
   attachment?: { name: string; type: string; size: number } | null;
 };
 type Reply = { id: string; title: string; body: string };
@@ -41,9 +43,9 @@ type Frame =
   | { type: 'message.ack'; requestId: string; data: Ack }
   | { type: 'error'; requestId: string | null; data: { status: number; code: string } };
 
-const { side, identity, auth, sid, accessVersion, canQueue, canSupervise } = defineProps<{
+const { side, identity, auth, sid, accessVersion, canQueue, canSupervise, guest } = defineProps<{
   side: SessionSide; identity: string; auth: { request: (path: string, options?: RequestInit, expectedSid?: string) => Promise<Response> }; sid: string;
-  accessVersion?: string; canQueue?: boolean; canSupervise?: boolean;
+  accessVersion?: string; canQueue?: boolean; canSupervise?: boolean; guest?: boolean;
 }>();
 const emit = defineEmits<{ expired: [] }>();
 const customer = side === 'customer';
@@ -73,6 +75,16 @@ const detail = ref<Detail | null>(null);
 const rows = shallowRef<ListItem[]>([]);
 const visibleMessages = shallowRef<ChatMessage[]>([]);
 const cursor = ref<string | null>(null);
+const filter = ref('');
+const filteredRows = computed(() => {
+  const term = filter.value.trim().toLowerCase();
+  return term ? rows.value.filter((row) => row.preview?.toLowerCase().includes(term)) : rows.value;
+});
+const queue = computed(() => view.value === 'PENDING');
+const selectedRow = computed(() => rows.value.find(({ id }) => id === selection.value));
+const shortTime = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' });
+const dayTime = new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const outgoing = (message: ChatMessage) => (message.sender === 'CUSTOMER') === customer;
 const hasOlder = ref(false);
 const draft = ref('');
 const sending = ref(false);
@@ -256,6 +268,7 @@ function select(id: string | null, preserveDraft = false) {
 
 function changeView(nextView: View, preserveDraft = false) {
   view.value = nextView;
+  filter.value = '';
   select(null, preserveDraft);
   rows.value = [];
   cursor.value = null;
@@ -368,8 +381,12 @@ async function markRead() {
 }
 
 async function perform(operation: Operation, row: ConversationRef, targetStaffId?: string) {
-  if (operation === 'close' && !window.confirm('结束这段会话？')) return;
-  if (operation === 'return' && !window.confirm('将这段会话退回本部门队列？')) return;
+  if (operation === 'close' || operation === 'return') {
+    const closing = operation === 'close';
+    const confirmed = await confirmAction(closing ? '结束会话' : '退回队列', closing
+      ? '结束这段会话？聊天记录仍可在历史会话中查看。' : '将这段会话退回本部门队列？');
+    if (!confirmed || closed || selection.value !== row.id) return;
+  }
   if (operation === 'close') await markRead();
   const key = [operation, row.id, row.stateVersion, row.lastCustomerSeq, targetStaffId].join(':');
   const actionId = actionKeys.get(key) ?? crypto.randomUUID();
@@ -597,11 +614,13 @@ function dispose() {
   window.clearInterval(interval);
   socket?.close();
   document.removeEventListener('visibilitychange', onVisible);
+  window.removeEventListener('scroll', markRead);
   for (const request of pending.values()) request.reject(new SessionError(401, 'SESSION_REQUIRED'));
 }
 
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisible);
+  window.addEventListener('scroll', markRead, { passive: true });
   interval = window.setInterval(onVisible, 30_000);
   void openSocket();
   void sync();
@@ -611,68 +630,92 @@ onUnmounted(dispose);
 </script>
 
 <template>
-  <section id="chat" :aria-label="customer ? '在线对话' : '客服工作台'">
-    <nav class="chat-tabs" aria-label="会话列表">
-      <button v-for="[value, title] in views" :key="value" type="button" :aria-pressed="view === value" @click="changeView(value)">
-        {{ title }}
-      </button>
-    </nav>
-    <p class="chat-summary">{{ summary }}</p>
-    <p class="chat-connection" aria-live="polite">{{ connection }}</p>
-    <p class="chat-notice" aria-live="polite">{{ notice }}</p>
-    <p v-if="customer && serviceHours && !serviceHours.open" class="chat-hours" aria-live="polite">
-      当前为非营业时间，可以继续留言。
-      <template v-if="serviceHours.nextOpen">
-        下次接待 {{ new Date(serviceHours.nextOpen).toLocaleString('zh-CN', { timeZone: serviceHours.zone }) }}（{{ serviceHours.zone }}）
-      </template>
-    </p>
-    <div v-if="!customer" class="chat-actions">
-      <button v-if="canQueue && accepting !== undefined" type="button" :disabled="updatingAvailability"
-        :aria-pressed="accepting" @click="toggleAvailability">{{ accepting ? '暂停接单' : '恢复接单' }}</button>
-      <span v-if="canQueue && accepting !== undefined">{{ accepting ? '接单中' : '已暂停接单' }}</span>
-      <button v-if="canQueue" type="button" @click="toggleNotifications">{{ notifications ? '关闭客服通知' : '开启客服通知' }}</button>
-      <button v-if="canSupervise" type="button" :aria-expanded="showTeam" @click="showTeam = !showTeam; readControls()">客服接单状态</button>
+  <section id="chat" :class="['chat-panel', { 'customer-panel': customer, 'embedded-panel': guest }]" :aria-label="customer ? '在线对话' : '客服工作台'">
+    <div v-if="!customer" class="workbar">
+      <span v-if="canQueue && accepting !== undefined" class="presence"><span :class="['dot', { paused: !accepting }]"></span>{{ accepting ? '接单中' : '已暂停接单' }}</span>
+      <el-button v-if="canQueue && accepting !== undefined" :disabled="updatingAvailability"
+        :aria-pressed="accepting" @click="toggleAvailability">{{ accepting ? '暂停接单' : '恢复接单' }}</el-button>
+      <el-button v-if="canQueue" :icon="Bell" @click="toggleNotifications">{{ notifications ? '关闭客服通知' : '开启客服通知' }}</el-button>
+      <el-button v-if="canSupervise" :icon="User" :aria-expanded="showTeam" @click="showTeam = !showTeam; readControls()">客服接单状态</el-button>
     </div>
-    <ul v-if="showTeam" aria-label="部门客服接单状态">
-      <li v-for="agent in team" :key="`${agent.department}:${agent.id}`">
-        {{ agent.department }} · {{ agent.name }}（{{ agent.email }}）· {{ agent.online ? '在线' : '离线' }} ·
-        {{ agent.accepting ? '接单中' : '暂停接单' }} · 进行中 {{ agent.active }}
-      </li>
-    </ul>
-    <div class="chat-layout">
-      <div>
-        <ul class="chat-list" aria-label="会话">
-          <li v-for="row in rows" :key="row.id">
-            <template v-if="!customer && view === 'PENDING'">
-              <p>{{ row.preview || labels[row.status] }}</p>
-              <time :datetime="row.timestamp">排队时间 {{ new Date(row.timestamp).toLocaleString() }}</time>
-              <p :class="{ 'queue-overdue': waitMinutes(row.timestamp) >= 10 }">
-                {{ waitMinutes(row.timestamp) >= 10 ? '等待已超时 · ' : '' }}已等待 {{ waitMinutes(row.timestamp) }} 分钟
-              </p>
-              <button type="button" @click="perform('claim', row)">领取</button>
-            </template>
-            <button v-else type="button" :aria-pressed="selection === row.id" @click="openConversation(row.id)">
-              {{ row.preview || labels[row.status] }}{{ row.unread ? `（${row.unread} 条未读）` : '' }}
-            </button>
-            <p v-if="view === 'DEPARTMENT' && row.status === 'WAITING'" :class="{ 'queue-overdue': waitMinutes(row.queuedAt) >= 10 }">
-              {{ waitMinutes(row.queuedAt) >= 10 ? '等待已超时 · ' : '' }}已等待 {{ waitMinutes(row.queuedAt) }} 分钟
-            </p>
-          </li>
-        </ul>
-        <button v-if="cursor" type="button" class="chat-next" @click="loadMoreConversations">更多会话</button>
-      </div>
-      <div>
-        <h2 class="chat-title">{{ detail ? labels[detail.status] : customer ? '在线对话' : '对话' }}</h2>
-        <p class="chat-meta">{{ meta }}</p>
-        <p class="chat-assignee">{{ detail?.assignee ? `负责人 ${detail.assignee}` : '' }}</p>
-          <p v-if="detail?.assigneeOnline === false" class="queue-overdue">负责人已离线</p>
-        <div class="chat-actions">
-          <button v-if="detail?.canReturn" type="button" @click="perform('return', detail)">退回队列</button>
-          <button v-if="detail?.canTransfer && !transfer" type="button" @click="openTransfer(detail)">转派会话</button>
-          <button v-if="detail?.canClose" type="button" @click="perform('close', detail)">结束会话</button>
-          <button v-if="customer && detail?.status === 'CLOSED'" type="button" @click="changeView('CURRENT', true)">发起新会话</button>
+    <div class="chat-feedback">
+      <p class="chat-connection" aria-live="polite">{{ connection }}</p>
+      <p class="chat-notice" aria-live="polite">{{ notice }}</p>
+      <p v-if="customer && serviceHours && !serviceHours.open" class="chat-hours" aria-live="polite">
+        当前为非营业时间，可以继续留言。
+        <template v-if="serviceHours.nextOpen">
+          下次接待 {{ new Date(serviceHours.nextOpen).toLocaleString('zh-CN', { timeZone: serviceHours.zone }) }}（{{ serviceHours.zone }}）
+        </template>
+      </p>
+    </div>
+
+    <div :class="['chat-layout', { 'queue-layout': queue, 'with-team': showTeam }]">
+      <section class="surface conversation-panel" aria-label="会话">
+        <div class="conversation-tools">
+          <h2>{{ queue ? '待领取队列' : customer ? '我的会话' : '会话' }}</h2>
+          <nav class="chat-tabs" aria-label="会话列表">
+            <el-button v-for="[value, title] in views" :key="value" size="small" :aria-pressed="view === value" @click="changeView(value)">{{ title }}</el-button>
+          </nav>
+          <el-input v-if="!customer && !queue" v-model="filter" :prefix-icon="Search" aria-label="筛选当前列表" placeholder="筛选当前列表" clearable />
+          <p class="chat-summary" aria-live="polite">{{ summary }}</p>
         </div>
-        <form v-if="transfer && detail?.canTransfer" class="chat-transfer" @submit.prevent="submitTransfer">
+        <el-table v-if="queue" :data="rows" class="data-table queue-table" empty-text="暂无待领取会话">
+          <el-table-column label="最新消息" min-width="190">
+            <template #default="{ row }"><strong class="queue-preview">{{ row.preview || labels[(row as ListItem).status] }}</strong></template>
+          </el-table-column>
+          <el-table-column label="等待时间" width="165">
+            <template #default="{ row }">
+              <el-tag v-if="waitMinutes(row.timestamp) >= 10" class="tag-warning" size="small" round>等待已超时</el-tag>
+              <span class="queue-elapsed">已等待 {{ waitMinutes(row.timestamp) }} 分钟</span>
+              <time class="queue-time" :datetime="row.timestamp">{{ dayTime.format(new Date(row.timestamp)) }} 入队</time>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="84" align="right">
+            <template #default="{ row }"><el-button type="primary" plain size="small" @click="perform('claim', row as ListItem)">领取</el-button></template>
+          </el-table-column>
+        </el-table>
+        <template v-else>
+          <ul class="chat-list" aria-label="会话">
+            <li v-for="row in filteredRows" :key="row.id">
+              <button type="button" class="conversation-row" :aria-pressed="selection === row.id" @click="openConversation(row.id)">
+                <el-avatar v-if="!customer" :size="34"><el-icon><User /></el-icon></el-avatar>
+                <span class="conversation-copy">
+                  <strong>{{ row.preview || labels[row.status] }}</strong>
+                  <small>{{ labels[row.status] }}</small>
+                </span>
+                <span class="conversation-meta">
+                  <time :datetime="row.timestamp">{{ shortTime.format(new Date(row.timestamp)) }}</time>
+                  <span v-if="row.unread" class="unread" :aria-label="`${row.unread} 条未读`">{{ row.unread }}</span>
+                </span>
+              </button>
+              <p v-if="view === 'DEPARTMENT' && row.status === 'WAITING'" class="department-wait" :class="{ 'queue-overdue': waitMinutes(row.queuedAt) >= 10 }">
+                {{ waitMinutes(row.queuedAt) >= 10 ? '等待已超时 · ' : '' }}已等待 {{ waitMinutes(row.queuedAt) }} 分钟
+              </p>
+            </li>
+          </ul>
+          <p v-if="!filteredRows.length" class="list-empty">{{ filter ? '没有匹配的会话' : '暂无会话' }}</p>
+        </template>
+        <el-button v-if="cursor" class="chat-next" link type="primary" @click="loadMoreConversations">更多会话</el-button>
+        <div v-if="$slots.sidebar" class="conversation-footer"><slot name="sidebar" /></div>
+      </section>
+
+      <section v-if="!queue" class="surface thread" aria-label="对话详情">
+        <header class="thread-header">
+          <el-avatar :size="42"><el-icon><component :is="customer ? Headset : User" /></el-icon></el-avatar>
+          <div class="thread-heading">
+            <h2 class="chat-title">{{ detail ? labels[detail.status] : customer ? '在线对话' : '对话' }}</h2>
+            <p class="chat-meta"><span v-if="detail?.customerOnline === true" class="dot"></span>{{ meta }}</p>
+            <p class="chat-assignee">{{ detail?.assignee ? `负责人 ${detail.assignee}` : '' }}</p>
+            <p v-if="detail?.assigneeOnline === false" class="queue-overdue">负责人已离线</p>
+          </div>
+          <div class="thread-actions">
+            <el-button v-if="detail?.canReturn" @click="perform('return', detail)">退回队列</el-button>
+            <el-button v-if="detail?.canTransfer && !transfer" type="primary" plain @click="openTransfer(detail)">转派会话</el-button>
+            <el-button v-if="detail?.canClose" :icon="CircleCheck" class="end-thread" @click="perform('close', detail)">结束会话</el-button>
+            <el-button v-if="customer && detail?.status === 'CLOSED'" type="primary" @click="changeView('CURRENT', true)">发起新会话</el-button>
+          </div>
+        </header>
+        <form v-if="transfer && detail?.canTransfer" class="chat-transfer field-stack" @submit.prevent="submitTransfer">
           <p v-if="!transfer.candidates" aria-live="polite">正在加载同部门客服…</p>
           <p v-else-if="!transfer.candidates.length">暂无可接手的同部门客服。</p>
           <label v-else>接手客服
@@ -681,42 +724,90 @@ onUnmounted(dispose);
               <option v-for="staff in transfer.candidates" :key="staff.id" :value="staff.id">{{ staffLabel(staff) }}</option>
             </select>
           </label>
-          <div class="chat-actions">
-            <button v-if="transfer.candidates?.length" type="submit" :disabled="!transferTarget || transferring">确认转派</button>
-            <button type="button" :disabled="transferring" @click="transfer = undefined">取消</button>
+          <div class="inline-actions">
+            <el-button v-if="transfer.candidates?.length" native-type="submit" type="primary" :disabled="!transferTarget || transferring">确认转派</el-button>
+            <el-button :disabled="transferring" @click="transfer = undefined">取消</el-button>
           </div>
         </form>
-        <button v-if="hasOlder" type="button" class="chat-older" @click="loadOlderMessages">加载早前消息</button>
+        <el-button v-if="hasOlder" class="chat-older" link type="primary" @click="loadOlderMessages">加载早前消息</el-button>
+        <div v-if="!visibleMessages.length" class="thread-empty">
+          <el-icon><ChatDotRound /></el-icon>
+          <span>{{ customer && canReply ? '发送一条消息开始对话' : selection ? '暂无消息' : '选择一段会话查看消息' }}</span>
+        </div>
         <ol ref="log" class="chat-log" aria-label="消息" tabindex="0" @scroll="markRead">
-          <li v-for="message in visibleMessages" :key="message.seq" :data-seq="message.seq">
-            <strong>{{ message.sender === 'CUSTOMER' ? '客户' : '客服' }}</strong>
-            <AttachmentMessage v-if="message.attachment" :name="message.attachment.name" :type="message.attachment.type"
-              :get-file="() => attachmentBlob(message)" />
-            <p v-else>{{ message.text }}</p>
+          <li v-for="message in visibleMessages" :key="message.seq" :data-seq="message.seq" :class="['message', { outgoing: outgoing(message) }]">
+            <el-avatar :size="29"><el-icon><component :is="message.sender === 'CUSTOMER' ? User : Headset" /></el-icon></el-avatar>
+            <div class="message-content">
+              <div class="message-author">
+                <strong>{{ outgoing(message) ? '我' : message.sender === 'CUSTOMER' ? '客户' : '客服' }}</strong>
+                <time v-if="message.createdAt" :datetime="message.createdAt">{{ dayTime.format(new Date(message.createdAt)) }}</time>
+              </div>
+              <AttachmentMessage v-if="message.attachment" :name="message.attachment.name" :type="message.attachment.type" :size="message.attachment.size"
+                :get-file="() => attachmentBlob(message)" />
+              <p v-else class="bubble">{{ message.text }}</p>
+            </div>
           </li>
         </ol>
         <form v-if="canReply" class="chat-form" @submit.prevent="submitMessage">
-          <label>消息<textarea v-model="draft" name="text" maxlength="4000" required :disabled="sending"></textarea></label>
-          <button type="submit" :disabled="sending">发送</button>
-          <button v-if="!customer" type="button" :aria-expanded="showReplies" @click="toggleReplies">快捷回复</button>
-          <div v-if="showReplies">
-            <label>搜索快捷回复<input v-model="query" type="search"></label>
-            <button v-for="reply in matches" :key="reply.id" type="button"
-              @click="draft = (draft ? draft + '\n' + reply.body : reply.body).slice(0, 4000); showReplies = false">{{ reply.title }}</button>
-            <p v-if="!matches.length">暂无匹配的快捷回复。</p>
+          <el-input v-model="draft" type="textarea" aria-label="消息" name="text" maxlength="4000" required :disabled="sending"
+            :rows="guest ? 2 : 3" resize="none" placeholder="输入消息…" />
+          <div v-if="showReplies" class="quick-reply-picker">
+            <el-input v-model="query" aria-label="搜索快捷回复" placeholder="搜索快捷回复" :prefix-icon="Search" />
+            <div class="inline-actions">
+              <el-button v-for="reply in matches" :key="reply.id" size="small"
+                @click="draft = (draft ? draft + '\n' + reply.body : reply.body).slice(0, 4000); showReplies = false">{{ reply.title }}</el-button>
+              <p v-if="!matches.length">暂无匹配的快捷回复。</p>
+            </div>
           </div>
-          <label>选择附件<input ref="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" :disabled="sending" @change="pickFile"></label>
-          <button v-if="attachment" type="button" :disabled="sending" @click="uploadFile">发送附件</button>
+          <div v-if="attachment" class="selected-file">
+            <span>{{ attachment.file.name }}</span>
+            <el-button link type="primary" :disabled="sending" @click="uploadFile">发送附件</el-button>
+          </div>
+          <div class="composer-bottom">
+            <div class="inline-actions">
+              <label class="attachment-picker" :class="{ disabled: sending }">
+                <el-icon><Paperclip /></el-icon>选择附件
+                <input ref="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" :disabled="sending" @change="pickFile">
+              </label>
+              <el-button v-if="!customer" link :icon="Document" :aria-expanded="showReplies" @click="toggleReplies">快捷回复</el-button>
+            </div>
+            <el-button native-type="submit" type="primary" :icon="Promotion" :disabled="sending">发送</el-button>
+          </div>
         </form>
-        <details v-if="!customer && detail" ref="history" class="chat-history" @toggle="loadHistory">
-          <summary>操作记录</summary>
-          <ol>
-            <li v-for="(entry, index) in historyRows" :key="index">
-              {{ historyText(entry) }}
+      </section>
+
+      <aside v-if="!customer && (detail || showTeam)" class="chat-aside">
+        <section v-if="showTeam" class="surface team-panel">
+          <h2>客服接单状态</h2>
+          <ul class="team-list" aria-label="部门客服接单状态">
+            <li v-for="agent in team" :key="`${agent.department}:${agent.id}`">
+              <el-avatar :size="33">{{ agent.name.charAt(0) }}</el-avatar>
+              <span class="team-user">
+                <strong>{{ agent.name }}</strong>
+                <small>{{ agent.department }} · {{ agent.online ? '在线' : '离线' }} · {{ agent.accepting ? '接单中' : '暂停接单' }}</small>
+              </span>
+              <span>进行中 {{ agent.active }}</span>
             </li>
-          </ol>
-        </details>
-      </div>
+            <li v-if="!team.length" class="list-empty">暂无部门客服</li>
+          </ul>
+        </section>
+        <section v-if="detail" class="surface contact-panel">
+          <h2>会话详情</h2>
+          <dl>
+            <div><dt>会话状态</dt><dd><el-tag round size="small" :class="detail.status === 'ACTIVE' ? 'tag-success' : detail.status === 'WAITING' ? 'tag-warning' : 'tag-neutral'">{{ labels[detail.status] }}</el-tag></dd></div>
+            <div><dt>负责人</dt><dd>{{ detail.assignee || '待领取' }}</dd></div>
+            <div><dt>入队时间</dt><dd>{{ dayTime.format(new Date(detail.queuedAt)) }}</dd></div>
+            <div v-if="selectedRow?.unread"><dt>未读消息</dt><dd>{{ selectedRow.unread }} 条</dd></div>
+          </dl>
+          <details ref="history" class="chat-history" @toggle="loadHistory">
+            <summary>操作记录</summary>
+            <el-timeline v-if="historyRows.length">
+              <el-timeline-item v-for="(entry, index) in historyRows" :key="index" type="primary">{{ historyText(entry) }}</el-timeline-item>
+            </el-timeline>
+            <p v-else class="list-empty">暂无操作记录</p>
+          </details>
+        </section>
+      </aside>
     </div>
   </section>
 </template>

@@ -7,16 +7,19 @@ export default defineConfig({
     vue(),
     {
       name: 'newcrisp-pages',
-      generateBundle(_options, bundle) {
-        const entry = Object.values(bundle).find((chunk) => chunk.type === 'chunk' && chunk.isEntry && chunk.name === 'main');
-        if (!entry) throw new Error('Missing Vue entry');
-        const styleLinks = Object.keys(bundle).filter((name) => name.endsWith('.css'))
-          .map((name) => `<link rel="stylesheet" href="/${name}">`).join('\n');
-        for (const [page, title] of [['staff', '客服工作台'], ['customer', '在线客服'], ['guest', '访客客服']]) {
-          this.emitFile({
-            type: 'asset',
-            fileName: `${page}.html`,
-            source: `<!doctype html>
+      generateBundle: {
+        order: 'post',
+        handler(_options, bundle) {
+          const entry = Object.values(bundle).find((chunk) => chunk.type === 'chunk' && chunk.isEntry && chunk.name === 'main');
+          if (!entry) throw new Error('Missing Vue entry');
+          const styleLinks = Object.keys(bundle).filter((name) => name.endsWith('.css'))
+            .map((name) => `<link rel="stylesheet" href="/${name}">`).join('\n');
+          if (!styleLinks) throw new Error('Missing NewCrisp stylesheet');
+          for (const [page, title] of [['staff', '客服工作台'], ['customer', '在线客服'], ['guest', '访客客服']]) {
+            this.emitFile({
+              type: 'asset',
+              fileName: `${page}.html`,
+              source: `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -27,8 +30,9 @@ ${styleLinks}
 </head>
 <body class="chat-page"><div id="app"></div></body>
 </html>`,
-          });
-        }
+            });
+          }
+        },
       },
     },
   ],

@@ -10,6 +10,7 @@ test('two tabs rotate in order; replay and logout revoke the family and close ti
   await createTenant(request, tenant);
   await page.goto('/staff.html');
   await signIn(page, tenant.adminEmail, tenant.adminPassword);
+  await page.getByRole('button', { name: '新增员工' }).click();
   await page.getByLabel('成员邮箱').fill(agentEmail);
   await page.getByLabel('初始密码').fill(agentPassword);
   await page.getByRole('button', { name: '创建成员' }).click();
@@ -81,7 +82,7 @@ test('two tabs rotate in order; replay and logout revoke the family and close ti
   const access = await page.evaluate(async () => (await (await import('/web-session.js')).webSession('staff').access()).accessToken);
   await page.getByRole('button', { name: '退出登录' }).click();
   await expect.poll(() => closed(winner[0], winner[1].id)).toBe(1008);
-  await expect(second.getByRole('heading', { name: '租户管理员登录' })).toBeVisible();
+  await expect(second.getByRole('heading', { name: '登录工作台' })).toBeVisible();
   expect((await request.get('/api/v1/staff/me', { headers: { Authorization: `Bearer ${access}` } })).status()).toBe(401);
   expect((await openSocket(page, unused)).ready).toBe(false);
 });
@@ -108,8 +109,8 @@ test('a lost refresh response makes both tabs stop refreshing the uncertain toke
   expect(committed).toBe(200);
   expect(await refresh(second).then(() => 200, () => 401)).toBe(401);
   expect(siblingRequests).toBe(0);
-  await expect(page.getByRole('heading', { name: '租户管理员登录' })).toBeVisible();
-  await expect(second.getByRole('heading', { name: '租户管理员登录' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '登录工作台' })).toBeVisible();
+  await expect(second.getByRole('heading', { name: '登录工作台' })).toBeVisible();
 });
 
 async function signIn(page, email, password, target = tenant) {

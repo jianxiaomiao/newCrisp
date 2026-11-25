@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, shallowRef } from 'vue';
+import { Connection, Headset } from '@element-plus/icons-vue';
 import ChatPanel from './ChatPanel.vue';
 
 const site = location.pathname.split('/').at(-1)!;
@@ -87,24 +88,32 @@ if (resume) void start();
 </script>
 
 <template>
-  <main>
-    <h1>{{ visitor?.tenantName ?? '访客客服' }}</h1>
-    <p v-if="error" aria-live="polite">{{ error }}</p>
-    <template v-if="!visitor">
-      <button type="button" :disabled="busy" @click="start()">{{ busy ? '正在连接…' : resume ? '接续会话' : '开始聊天' }}</button>
-      <button v-if="error && resume" type="button" :disabled="busy" @click="start(true)">以新访客开始</button>
-      <details>
-        <summary>使用已有接续码</summary>
-        <form @submit.prevent="continueWithCode">
-          <label>已有访客接续码<input v-model="previousCode" required maxlength="90" autocomplete="off"></label>
-          <button type="submit" :disabled="busy">继续之前的会话</button>
+  <main class="guest-shell surface">
+    <header class="guest-heading">
+      <el-avatar :size="42"><el-icon><Headset /></el-icon></el-avatar>
+      <div><h1>{{ visitor?.tenantName ?? '访客客服' }}</h1><p>网站访客</p></div>
+    </header>
+    <p v-if="error" class="feedback guest-feedback" aria-live="polite">{{ error }}</p>
+    <div v-if="!visitor" class="guest-welcome">
+      <div class="inline-actions">
+        <el-button type="primary" :disabled="busy" @click="start()">{{ busy ? '正在连接…' : resume ? '接续会话' : '开始聊天' }}</el-button>
+        <el-button v-if="error && resume" :disabled="busy" @click="start(true)">以新访客开始</el-button>
+      </div>
+      <details class="customer-resume">
+        <summary><el-icon><Connection /></el-icon>使用已有接续码</summary>
+        <form class="field-stack" @submit.prevent="continueWithCode">
+          <label>已有访客接续码
+            <el-input v-model="previousCode" aria-label="已有访客接续码" required maxlength="90" autocomplete="off" />
+          </label>
+          <el-button native-type="submit" type="primary" :disabled="busy">继续之前的会话</el-button>
         </form>
       </details>
-    </template>
-    <template v-else>
-      <button type="button" @click="showCode = !showCode">{{ showCode ? '隐藏接续码' : '显示访客接续码' }}</button>
-      <label v-if="showCode">访客接续码<input readonly :value="`${site}.${resume}`"></label>
-      <ChatPanel :key="visitor.token.sessionId" side="customer" :identity="visitor.customerId" :sid="visitor.token.sessionId" :auth="auth" @expired="expired" />
-    </template>
+    </div>
+    <ChatPanel v-else :key="visitor.token.sessionId" side="customer" :identity="visitor.customerId" :sid="visitor.token.sessionId" :auth="auth" guest @expired="expired">
+      <template #sidebar>
+        <el-button link type="primary" :icon="Connection" :aria-expanded="showCode" @click="showCode = !showCode">{{ showCode ? '隐藏接续码' : '显示访客接续码' }}</el-button>
+        <label v-if="showCode" class="guest-code">访客接续码<el-input readonly aria-label="访客接续码" :model-value="`${site}.${resume}`" /></label>
+      </template>
+    </ChatPanel>
   </main>
 </template>
