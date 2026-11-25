@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -38,6 +39,7 @@ class ChatWebSocket extends TextWebSocketHandler {
     private static final CloseStatus STAFF_DISABLED = new CloseStatus(4004, "Staff disabled");
     private static final Logger log = LoggerFactory.getLogger(ChatWebSocket.class);
     private final ConcurrentMap<String, Peer> peers = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, Set<Peer>> peersByTenant = new ConcurrentHashMap<>();
     private final Semaphore awaitingAuth = new Semaphore(128);
     private final ChatIdentity identity;
     private final ChatService chat;
@@ -86,6 +88,11 @@ class ChatWebSocket extends TextWebSocketHandler {
                 }
                 return;
             }
+            if ("typing".equals(frame.type())) {
+                Actor actor = refresh(peer);
+                handleTyping(actor, uuid(frame.conversationId()), Boolean.TRUE.equals(frame.active()));
+                return;
+            }
             requestId = uuid(frame.requestId());
             Actor actor = refresh(peer);
             String conversationId = switch (frame.type()) {
@@ -117,9 +124,11 @@ class ChatWebSocket extends TextWebSocketHandler {
         Actor actor = identity.authenticate(peer.access);
         if (!clock.instant().isBefore(peer.authBy) || peers.get(peer.socket.getId()) != peer) throw IdentityError.unauthorized();
         peer.actor = actor;
+        peersByTenant.computeIfAbsent(actor.tenantId(), k -> ConcurrentHashMap.newKeySet()).add(peer);
         releaseAuthSlot(peer);
         if (!confirmPresence(peer, actor)) return;
         send(peer, new ServerFrame("ready", null, actor.id()));
+        notifyPresenceChange(peer);
         ping(peer);
     }
 
@@ -185,13 +194,15 @@ class ChatWebSocket extends TextWebSocketHandler {
     }
 
     private void publish(Outbox event) {
+        var tenantPeers = peersByTenant.get(event.tenantId());
+        if (tenantPeers == null || tenantPeers.isEmpty()) return;
         var chatRow = store.find(event.tenantId(), event.conversationId(), false).orElseThrow();
         var message = event.sequence() == null ? null : store.message(chatRow, event.sequence()).orElseThrow().publicMessage();
         IdentityError unavailable = null;
-        for (Peer peer : peers.values()) {
+        for (Peer peer : tenantPeers) {
             var initial = peer.actor;
             if (initial == null) continue;
-            if (initial.tenantId() != chatRow.tenantId() || (initial.customer() && !initial.id().equals(chatRow.customerId()))) continue;
+            if (initial.customer() && !initial.id().equals(chatRow.customerId())) continue;
             if (!initial.customer() && !initial.agentDepartments().contains(chatRow.departmentId())
                     && !initial.supervisorDepartments().contains(chatRow.departmentId())) continue;
             try {
@@ -202,15 +213,14 @@ class ChatWebSocket extends TextWebSocketHandler {
                     continue;
                 }
                 if (message != null || event.assignmentVersion() != null) {
-                    var current = store.find(event.tenantId(), event.conversationId(), false).orElseThrow();
-                    if (message != null && ChatService.canRead(actor, current)) {
+                    if (message != null && ChatService.canRead(actor, chatRow)) {
                         send(peer, new ServerFrame("message.created", null, message));
                     }
-                    if (current.state() == State.ACTIVE && ChatService.owns(actor, current)
-                            && ((event.assignmentVersion() != null && event.assignmentVersion() == current.version())
-                            || (message != null && "CUSTOMER".equals(message.sender()) && event.sequence() > current.staffReadSeq()))) {
+                    if (chatRow.state() == State.ACTIVE && ChatService.owns(actor, chatRow)
+                            && ((event.assignmentVersion() != null && event.assignmentVersion() == chatRow.version())
+                            || (message != null && "CUSTOMER".equals(message.sender()) && event.sequence() > chatRow.staffReadSeq()))) {
                         send(peer, new ServerFrame("staff.notification", null,
-                                new Notification(current.id(), Long.toString(event.id()), event.assignmentVersion() != null)));
+                                new Notification(chatRow.id(), Long.toString(event.id()), event.assignmentVersion() != null)));
                     }
                 }
                 send(peer, new ServerFrame("sync.required", null, null));
@@ -267,8 +277,20 @@ class ChatWebSocket extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         Peer peer = peers.remove(session.getId());
         if (peer != null) {
-            if (peer.side == Side.STAFF) presence.forget(session.getId());
+            removeTenantIndex(peer);
+            presence.forget(session.getId());
             releaseAuthSlot(peer);
+            notifyPresenceChange(peer);
+        }
+    }
+
+    private void notifyPresenceChange(Peer peer) {
+        var actor = peer.actor;
+        if (actor == null || !actor.customer()) return;
+        for (Peer other : peersByTenant.getOrDefault(actor.tenantId(), Set.of())) {
+            if (other.actor != null && !other.actor.customer()) {
+                send(other, new ServerFrame("sync.required", null, null));
+            }
         }
     }
 
@@ -284,21 +306,48 @@ class ChatWebSocket extends TextWebSocketHandler {
 
     private void drop(Peer peer, CloseStatus status, boolean revoked) {
         peers.remove(peer.socket.getId(), peer);
+        removeTenantIndex(peer);
         releaseAuthSlot(peer);
-        if (revoked || peer.side == Side.STAFF) presence.forget(peer.socket.getId());
+        presence.forget(peer.socket.getId());
+        notifyPresenceChange(peer);
         try { peer.socket.close(status); }
         catch (IOException ignored) { /* transport is already gone */ }
+    }
+
+    private void removeTenantIndex(Peer peer) {
+        var actor = peer.actor;
+        if (actor == null) return;
+        var set = peersByTenant.get(actor.tenantId());
+        if (set != null) set.remove(peer);
     }
 
     private void releaseAuthSlot(Peer peer) {
         if (peer.pending.compareAndSet(true, false)) awaitingAuth.release();
     }
 
+    private void handleTyping(Actor actor, String conversationId, boolean active) {
+        var chatRow = store.find(actor.tenantId(), conversationId, false).orElse(null);
+        if (chatRow == null || chatRow.state() == State.CLOSED || !ChatService.canRead(actor, chatRow)) return;
+        if (!actor.customer() && !ChatService.owns(actor, chatRow)) return;
+        var payload = new ServerFrame("typing", null,
+                new TypingEvent(conversationId, actor.customer() ? "CUSTOMER" : "STAFF", active));
+        for (Peer target : peersByTenant.getOrDefault(chatRow.tenantId(), Set.of())) {
+            var other = target.actor;
+            if (other == null) continue;
+            if (actor.customer()) {
+                if (!other.customer() && ChatService.owns(other, chatRow)) send(target, payload);
+            } else {
+                if (other.customer() && other.id().equals(chatRow.customerId())) send(target, payload);
+            }
+        }
+    }
+
     private record ClientFrame(String type, String requestId, String conversationId, String clientMessageId,
-                               String text, String stateVersion, String nonce, String ticket) {}
+                               String text, String stateVersion, String nonce, String ticket, Boolean active) {}
     private record ServerFrame(String type, String requestId, Object data) {}
     private record Failure(String code, int status) {}
     private record Notification(String conversationId, String eventId, boolean assigned) {}
+    private record TypingEvent(String conversationId, String sender, boolean active) {}
 
     private static final class Peer {
         final WebSocketSession socket;

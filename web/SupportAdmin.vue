@@ -5,10 +5,14 @@ import { confirmAction } from './confirmation';
 import { responseError } from './api';
 import { SessionError, webSession } from './web-session';
 
-type Reply = { id: string; title: string; body: string };
+type Reply = { id: string; title: string; body: string; personal?: boolean };
 type Site = { id: string; title: string; origin: string; enabled: boolean };
+type Tag = { id: string; name: string; color: string };
 type Hours = { day: number; start: string; end: string };
-type Settings = { zone: string; windows: Hours[] | null; maxActive: number | null; fillQueue: boolean };
+type Settings = {
+  zone: string; windows: Hours[] | null; maxActive: number | null; fillQueue: boolean;
+  welcomeMessage?: string | null; autoCloseMinutes?: number | null;
+};
 
 const { sid, view } = defineProps<{ sid: string; view: 'rules' | 'replies' | 'sites' }>();
 const emit = defineEmits<{ expired: [] }>();
@@ -18,11 +22,16 @@ const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '�
 const schedule = reactive(weekdays.map((label, index) => ({
   label, day: index + 1, enabled: index < 5, start: '09:00', end: '18:00',
 })));
-const config = reactive({ zone: 'Asia/Shanghai', enabled: false, maxActive: '', fillQueue: false });
+const config = reactive({
+  zone: 'Asia/Shanghai', enabled: false, maxActive: '', fillQueue: false,
+  welcomeMessage: '', autoCloseMinutes: '',
+});
 const reply = reactive({ id: '', title: '', body: '' });
 const site = reactive({ title: '', origin: '' });
+const tagForm = reactive({ name: '', color: '#2563eb' });
 const replies = ref<Reply[]>([]);
 const sites = ref<Site[]>([]);
+const tags = ref<Tag[]>([]);
 const notice = ref('');
 const loaded = ref(false);
 const busy = ref(false);
@@ -39,21 +48,23 @@ async function request(path: string, method = 'GET', body?: object) {
 }
 
 async function load() {
-  const [settingResponse, replyResponse, siteResponse] = await Promise.all([
-    request('/support-settings'), request('/quick-replies'), request('/guest-sites'),
+  const [settingResponse, replyResponse, siteResponse, tagResponse] = await Promise.all([
+    request('/support-settings'), request('/quick-replies'), request('/guest-sites'), request('/tags'),
   ]);
   const settings: Settings = await settingResponse.json();
   Object.assign(config, {
     zone: settings.zone, enabled: settings.windows !== null,
     maxActive: settings.maxActive?.toString() ?? '', fillQueue: settings.fillQueue,
+    welcomeMessage: settings.welcomeMessage ?? '', autoCloseMinutes: settings.autoCloseMinutes?.toString() ?? '',
   });
   if (settings.windows) for (const entry of schedule) {
     const saved = settings.windows.find(({ day }) => day === entry.day);
     entry.enabled = !!saved;
     if (saved) Object.assign(entry, { start: saved.start, end: saved.end });
   }
-  replies.value = await replyResponse.json();
+  replies.value = (await replyResponse.json() as Reply[]).filter((r) => !r.personal);
   sites.value = await siteResponse.json();
+  tags.value = await tagResponse.json();
 }
 
 async function run(task: () => Promise<void>, message: string) {
@@ -78,10 +89,30 @@ async function run(task: () => Promise<void>, message: string) {
 function saveSettings() {
   void run(async () => {
     await request('/support-settings', 'PUT', {
-      zone: config.zone.trim(), maxActive: config.maxActive === '' ? null : Number(config.maxActive), fillQueue: config.fillQueue,
+      zone: config.zone.trim(),
+      maxActive: config.maxActive === '' ? null : Number(config.maxActive),
+      fillQueue: config.fillQueue,
+      welcomeMessage: config.welcomeMessage.trim() || null,
+      autoCloseMinutes: config.autoCloseMinutes === '' ? null : Number(config.autoCloseMinutes),
       windows: config.enabled ? schedule.filter(({ enabled }) => enabled).map(({ day, start, end }) => ({ day, start, end })) : null,
     });
   }, '接待规则已保存。');
+}
+
+function createTag() {
+  if (!tagForm.name.trim()) return;
+  void run(async () => {
+    await request('/tags', 'POST', { name: tagForm.name.trim(), color: tagForm.color });
+    tagForm.name = '';
+    tags.value = await (await request('/tags')).json();
+  }, '标签已创建。');
+}
+
+function deleteTag(id: string) {
+  void run(async () => {
+    await request(`/tags/${id}`, 'DELETE');
+    tags.value = await (await request('/tags')).json();
+  }, '标签已删除。');
 }
 
 function clearReply() { Object.assign(reply, { id: '', title: '', body: '' }); }
@@ -119,6 +150,10 @@ async function disableSite(id: string) {
   }, '访客入口已停用。');
 }
 
+function widgetCode(entry: Site) {
+  return `<script src="${window.location.origin}/widget.js" data-site="${entry.id}" async><\/script>`;
+}
+
 function embedCode(entry: Site) {
   return `<iframe src="${window.location.origin}/embed/${entry.id}" title="在线客服" width="420" height="600"></iframe>`;
 }
@@ -145,6 +180,14 @@ onUnmounted(() => abort.abort());
               <div><strong>待领取自动补派</strong><small>客服恢复接单或释放名额时，优先分配等待最久的会话。</small></div>
               <el-switch v-model="config.fillQueue" aria-label="启用待领取自动补派" />
             </div>
+            <div class="rules-row">
+              <label for="auto-close"><strong>无回复自动结束（分钟）</strong><small>客服回复后客户超时未回应则自动关闭并释放名额（5–43200）。</small></label>
+              <el-input id="auto-close" v-model="config.autoCloseMinutes" type="number" min="5" max="43200" placeholder="不自动关闭" />
+            </div>
+            <div class="field-stack">
+              <label for="welcome-msg"><strong>自动欢迎语</strong><small>客户发起新会话时自动发送一条系统欢迎消息。</small></label>
+              <el-input id="welcome-msg" v-model="config.welcomeMessage" type="textarea" :rows="2" maxlength="1000" placeholder="例如：您好，请问有什么可以帮您？" />
+            </div>
           </section>
           <section class="surface settings-card">
             <header class="section-head">
@@ -170,6 +213,19 @@ onUnmounted(() => abort.abort());
         </div>
         <el-button native-type="submit" type="primary" :icon="Check" :disabled="busy">保存接待规则</el-button>
       </form>
+
+      <section v-if="view === 'rules'" class="surface settings-card" style="margin-top: 16px;">
+        <header class="section-head"><div><h2>会话标签</h2><p>客服可为会话打上业务分类标签，便于筛选与统计。</p></div></header>
+        <form class="inline-actions" @submit.prevent="createTag">
+          <el-input v-model="tagForm.name" placeholder="新标签名称（如：账单、Bug）" maxlength="32" style="max-width: 220px;" />
+          <input v-model="tagForm.color" type="color" aria-label="标签颜色" style="height: 32px; width: 42px; border: 0; background: transparent; cursor: pointer;">
+          <el-button native-type="submit" type="primary" plain :disabled="busy || !tagForm.name.trim()">添加标签</el-button>
+        </form>
+        <div class="inline-actions" style="margin-top: 12px; flex-wrap: wrap;">
+          <el-tag v-for="t in tags" :key="t.id" closable :color="t.color" effect="dark" style="border: 0;" @close="deleteTag(t.id)">{{ t.name }}</el-tag>
+          <span v-if="!tags.length" class="list-empty">暂无标签</span>
+        </div>
+      </section>
 
       <div v-else-if="view === 'replies'" class="settings-layout">
         <section class="surface settings-card">
@@ -222,6 +278,7 @@ onUnmounted(() => abort.abort());
                 <el-tag size="small" round :class="entry.enabled ? 'tag-success' : 'tag-neutral'">{{ entry.enabled ? '启用中' : '已停用' }}</el-tag>
               </div>
               <div v-if="entry.enabled" class="field-stack site-embed">
+                <label>悬浮窗接入代码（推荐，Crisp 样式右下角弹出）<el-input type="textarea" aria-label="悬浮窗接入代码" readonly :rows="2" :model-value="widgetCode(entry)" /></label>
                 <label>嵌入代码<el-input type="textarea" aria-label="嵌入代码" readonly :rows="3" :model-value="embedCode(entry)" /></label>
                 <el-button link type="danger" :disabled="busy" @click="disableSite(entry.id)">停用入口</el-button>
               </div>

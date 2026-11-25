@@ -41,9 +41,12 @@ ${styleLinks}
     emptyOutDir: true,
     cssCodeSplit: false,
     rolldownOptions: {
-      input: { main: 'web/main.ts', 'web-session': 'web/web-session.ts' },
+      input: { main: 'web/main.ts', 'web-session': 'web/web-session.ts', widget: 'web/widget.ts' },
       preserveEntrySignatures: 'strict',
-      output: { entryFileNames: (entry) => entry.name === 'web-session' ? 'web-session.js' : 'assets/[name]-[hash].js' },
+      output: {
+        entryFileNames: (entry) => entry.name === 'web-session' ? 'web-session.js'
+          : entry.name === 'widget' ? 'widget.js' : 'assets/[name]-[hash].js',
+      },
     },
   },
 });

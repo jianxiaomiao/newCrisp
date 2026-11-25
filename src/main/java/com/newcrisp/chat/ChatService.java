@@ -62,6 +62,7 @@ class ChatService {
         var prior = store.replay(actor, key);
         if (prior.isPresent()) return replay(actor, prior.get(), requested, first, text, conversation, upload);
 
+        boolean created = false;
         if (first) {
             conversation = store.active(actor).orElse(null);
             if (conversation == null) {
@@ -70,6 +71,7 @@ class ChatService {
                 var newId = UUID.randomUUID().toString();
                 store.create(actor, newId, now);
                 conversation = require(actor, newId, true);
+                created = true;
                 if (!olderWaiting && hours.status(actor.tenantId(), clock.instant()).open()) assignToOnlineAgent(conversation, now);
             }
         }
@@ -82,6 +84,13 @@ class ChatService {
             var message = store.append(conversation, actor, key, text, first, now);
             if (upload != null) message = store.attach(conversation, message, upload);
             store.enqueue(conversation, message.seq(), now);
+            if (created) {
+                var settings = hours.get(actor.tenantId());
+                if (settings != null && settings.welcomeMessage() != null && !settings.welcomeMessage().isBlank()) {
+                    var welcome = store.appendSystem(conversation, message.seq() + 1, settings.welcomeMessage(), now);
+                    store.enqueue(conversation, welcome.seq(), now);
+                }
+            }
             return new Sent(message.publicMessage(), false);
         } catch (DuplicateKeyException conflict) {
             // Same-room writes are serialized. A duplicate here is a conflicting use in another conversation.
@@ -146,7 +155,7 @@ class ChatService {
         Long seen = op == Operation.CLOSE ? number(input.observedCustomerSeq()) : null;
         String target = op == Operation.TRANSFER ? uuid(input.targetStaffId()) : null;
         String reason = input.reason() == null || input.reason().isBlank() ? null : input.reason().strip();
-        if (reason != null && (op != Operation.RETURN || reason.codePointCount(0, reason.length()) > 400)) {
+        if (reason != null && ((op != Operation.RETURN && op != Operation.TRANSFER) || reason.codePointCount(0, reason.length()) > 400)) {
             throw invalid("INVALID_ACTION_REASON");
         }
         if ((op != Operation.CLOSE && input.observedCustomerSeq() != null)
@@ -201,6 +210,19 @@ class ChatService {
             return result(chat, op, version);
         } catch (DuplicateKeyException conflict) {
             throw conflict("ACTION_ID_CONFLICT");
+        }
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    void autoCloseIdle(long tenantId, int minutes) {
+        store.lockRouting(tenantId);
+        var now = LocalDateTime.now(clock);
+        var cutoff = now.minusMinutes(minutes);
+        for (var chat : store.idleConversations(tenantId, cutoff, 25)) {
+            var notice = store.appendSystem(chat, chat.lastSeq() + 1, "由于长时间未收到回复，系统已自动结束本次会话。", now);
+            store.recordAutoClose(chat, "超时 " + minutes + " 分钟无客户回复自动结束", now);
+            store.change(chat, State.CLOSED, chat.assigneeId(), now);
+            store.enqueue(chat, notice.seq(), now);
         }
     }
 
@@ -267,6 +289,18 @@ class ChatService {
     }
 
     String assigneeName(Conversation conversation) { return store.assigneeName(conversation); }
+
+    CustomerInfo customerInfo(Conversation conversation) {
+        return store.customerInfo(conversation.tenantId(), conversation.customerId());
+    }
+
+    @Transactional(readOnly = true)
+    List<ListItem> customerHistory(Actor actor, String customerId) {
+        if (actor.customer()) throw IdentityError.notFound();
+        var depts = new java.util.HashSet<String>(actor.agentDepartments());
+        depts.addAll(actor.supervisorDepartments());
+        return store.customerHistory(actor, uuid(customerId), depts);
+    }
 
     @Transactional(readOnly = true)
     java.util.List<ActionHistory> history(Actor actor, String id) {

@@ -44,14 +44,24 @@ class ChatController {
         boolean owner = ChatService.owns(actor, row);
         boolean active = row.state() == State.ACTIVE;
         boolean canSupervise = !actor.customer() && active && actor.supervisorDepartments().contains(row.departmentId());
+        long counterpartRead = actor.customer() ? row.staffReadSeq() : row.customerReadSeq();
         return ok(new Detail(row.id(), row.state(), Long.toString(row.version()), Long.toString(row.lastSeq()),
                 Long.toString(row.lastCustomerSeq()), Long.toString(actor.customer() ? row.customerReadSeq() : owner ? row.staffReadSeq() : 0),
+                Long.toString(counterpartRead),
                 actor.customer() ? row.state() != State.CLOSED : owner && active,
                 canSupervise, canSupervise,
                 owner && active, chat.assigneeName(row),
                 actor.customer() ? null : presence.online(row.tenantId(), row.customerId()),
                 canSupervise ? presence.agentOnline(row.tenantId(), row.departmentId(), row.assigneeId()) : null,
-                row.queuedAt() + "Z"));
+                row.queuedAt() + "Z",
+                actor.customer() ? null : chat.customerInfo(row)));
+    }
+
+    @GetMapping("/customers/{customerId}/conversations")
+    ResponseEntity<java.util.List<ListItem>> customerHistory(@PathVariable String side, @PathVariable String customerId,
+                                                             HttpServletRequest request) {
+        if (!"staff".equals(side)) throw IdentityError.notFound();
+        return ok(chat.customerHistory(actor(request, side, false), customerId));
     }
 
     @GetMapping("/conversations/{id}/transfer-candidates")

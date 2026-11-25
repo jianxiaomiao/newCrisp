@@ -15,6 +15,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.AdditionalMatchers.aryEq;
@@ -41,7 +42,7 @@ class NexusLaunchServiceTest {
     @BeforeEach
     void setUp() {
         var settings = new IdentityConfiguration.Settings("https://chat.example.test", "", "", "", Duration.ofSeconds(60));
-        service = new NexusLaunchService(store, verifier, new TransactionTemplate(transactionManager), CLOCK, settings, tokens, unread);
+        service = new NexusLaunchService(store, verifier, new TransactionTemplate(transactionManager), CLOCK, settings, tokens, unread, new ObjectMapper());
     }
 
     @Test
@@ -52,7 +53,21 @@ class NexusLaunchServiceTest {
 
         String result = service.issue("Bearer " + KEY_ID + "." + secret, 7, 11);
 
-        verify(store).createGrant(aryEq(IdentityTokens.digest(result)), eq(key), eq(7L), eq(11L), eq(NOW.plusMinutes(1)));
+        verify(store).createGrant(aryEq(IdentityTokens.digest(result)), eq(key), eq(7L), eq(11L), eq(NOW.plusMinutes(1)), isNull());
+    }
+
+    @Test
+    void issuesGrantWithNormalizedCustomerProfile() {
+        String secret = IdentityTokens.generate();
+        var key = new NexusStore.IntegrationKey(17, "nexus-a", IdentityTokens.digest(secret));
+        when(store.integrationKey(KEY_ID)).thenReturn(Optional.of(key));
+        var profile = new NexusLaunchService.CustomerProfileInput(" 张小明 ", "ming@example.com", null, "https://img.example.com/a.png",
+                java.util.Map.of("plan", "Pro"));
+
+        String result = service.issue("Bearer " + KEY_ID + "." + secret, 7, 11, profile);
+
+        verify(store).createGrant(aryEq(IdentityTokens.digest(result)), eq(key), eq(7L), eq(11L), eq(NOW.plusMinutes(1)),
+                eq(new NexusStore.ProfileSnapshot("张小明", "ming@example.com", null, "https://img.example.com/a.png", "{\"plan\":\"Pro\"}")));
     }
 
     @Test
@@ -61,7 +76,7 @@ class NexusLaunchServiceTest {
         when(store.integrationKey(KEY_ID)).thenReturn(Optional.of(key));
 
         assertThatThrownBy(() -> service.issue("Bearer " + KEY_ID + "." + token, 7, 11)).hasMessage("SESSION_REQUIRED");
-        verify(store, never()).createGrant(any(), any(), anyLong(), anyLong(), any());
+        verify(store, never()).createGrant(any(), any(), anyLong(), anyLong(), any(), any());
     }
 
     @Test
@@ -110,7 +125,7 @@ class NexusLaunchServiceTest {
         when(transactionManager.getTransaction(any())).thenReturn(status);
 
         assertThatThrownBy(() -> service.redeem(token, NEXUS_ORIGIN)).hasMessage("INVALID_LAUNCH_GRANT");
-        verify(store, never()).createSession(any(), any(), any(), any());
+        verify(store, never()).createSession(any(), any(), any(), any(), any());
         verify(transactionManager).rollback(status);
     }
 

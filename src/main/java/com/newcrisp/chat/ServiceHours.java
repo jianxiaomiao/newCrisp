@@ -22,19 +22,25 @@ public class ServiceHours {
     }
 
     public Settings get(long tenant) {
-        return jdbc.sql("SELECT hours_zone, business_hours, assignment_limit, dispatch_waiting FROM tenant WHERE id = ?")
+        return jdbc.sql("SELECT hours_zone, business_hours, assignment_limit, dispatch_waiting, welcome_message, auto_close_minutes FROM tenant WHERE id = ?")
                 .param(tenant).query((rs, row) -> {
                     String hours = rs.getString("business_hours");
                     return new Settings(rs.getString("hours_zone"), hours == null ? null
                             : json.readValue(hours, new TypeReference<List<Window>>() {}),
-                            rs.getObject("assignment_limit", Integer.class), rs.getBoolean("dispatch_waiting"));
+                            rs.getObject("assignment_limit", Integer.class), rs.getBoolean("dispatch_waiting"),
+                            rs.getString("welcome_message"), rs.getObject("auto_close_minutes", Integer.class));
                 }).single();
     }
 
     public void save(long tenant, Settings input) {
+        String welcome = input.welcomeMessage() == null || input.welcomeMessage().isBlank() ? null : input.welcomeMessage().strip();
         try {
             if (!ZoneId.getAvailableZoneIds().contains(input.zone())) throw new IllegalArgumentException();
             if (input.maxActive() != null && (input.maxActive() < 1 || input.maxActive() > 1000)) throw new IllegalArgumentException();
+            if (input.autoCloseMinutes() != null && (input.autoCloseMinutes() < 5 || input.autoCloseMinutes() > 43200)) {
+                throw new IllegalArgumentException();
+            }
+            if (welcome != null && welcome.codePointCount(0, welcome.length()) > 1000) throw new IllegalArgumentException();
             if (input.windows() != null) {
                 var days = new HashSet<Integer>();
                 if (input.windows().isEmpty()) throw new IllegalArgumentException();
@@ -49,9 +55,9 @@ public class ServiceHours {
         }
         // The administrator's update and routing decisions are serialized for this tenant.
         jdbc.sql("SELECT tenant_id FROM chat_routing_lock WHERE tenant_id = ? FOR UPDATE").param(tenant).query(Long.class).single();
-        jdbc.sql("UPDATE tenant SET hours_zone = ?, business_hours = ?, assignment_limit = ?, dispatch_waiting = ? WHERE id = ?")
+        jdbc.sql("UPDATE tenant SET hours_zone = ?, business_hours = ?, assignment_limit = ?, dispatch_waiting = ?, welcome_message = ?, auto_close_minutes = ? WHERE id = ?")
                 .params(input.zone(), input.windows() == null ? null : json.writeValueAsString(input.windows()),
-                        input.maxActive(), input.fillQueue(), tenant).update();
+                        input.maxActive(), input.fillQueue(), welcome, input.autoCloseMinutes(), tenant).update();
     }
 
     Status status(long tenant, Instant now) { return status(get(tenant), now); }
@@ -75,7 +81,12 @@ public class ServiceHours {
         return new Status(false, next, settings.zone());
     }
 
-    public record Settings(String zone, List<Window> windows, Integer maxActive, boolean fillQueue) {}
+    public record Settings(String zone, List<Window> windows, Integer maxActive, boolean fillQueue,
+                           String welcomeMessage, Integer autoCloseMinutes) {
+        public Settings(String zone, List<Window> windows, Integer maxActive, boolean fillQueue) {
+            this(zone, windows, maxActive, fillQueue, null, null);
+        }
+    }
     public record Window(int day, String start, String end) {}
     public record Status(boolean open, Instant nextOpen, String zone) {}
 }

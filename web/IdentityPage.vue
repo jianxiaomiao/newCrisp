@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, shallowRef } from 'vue';
-import { ArrowLeft, ChatDotRound, CircleCheck, Connection, Document, Grid, Link, Lock, Setting, SwitchButton, User } from '@element-plus/icons-vue';
+import { ArrowLeft, ChatDotRound, CircleCheck, Connection, DataAnalysis, Document, Grid, Link, Lock, Setting, SwitchButton, User } from '@element-plus/icons-vue';
 import BrandMark from './BrandMark.vue';
 import ChatPanel from './ChatPanel.vue';
 import TenantManagement from './TenantManagement.vue';
 import SupportAdmin from './SupportAdmin.vue';
+import AnalyticsDashboard from './AnalyticsDashboard.vue';
 import { SessionError, webSession, type SessionSide } from './web-session';
 
 type StaffProfile = {
@@ -21,6 +22,7 @@ type Visit = { sid: string; user: StaffProfile | CustomerProfile };
 
 const { side } = defineProps<{ side: SessionSide }>();
 const customer = side === 'customer';
+const embedded = customer && new URLSearchParams(window.location.search).get('embed') === '1';
 const auth = webSession(side);
 const feedback = ref(customer ? '正在验证登录…' : '');
 const visit = shallowRef<Visit>();
@@ -31,6 +33,7 @@ const linkingGuest = ref(false);
 const guestCode = ref('');
 const guestNotice = ref('');
 const adminViews = [
+  { id: 'analytics', label: '数据看板', icon: DataAnalysis },
   { id: 'rules', label: '接待规则', icon: Setting },
   { id: 'replies', label: '共享快捷回复', icon: Document },
   { id: 'sites', label: '访客入口', icon: Link },
@@ -181,8 +184,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="customer" class="customer-shell">
-    <header class="consumer-bar">
+  <div v-if="customer" :class="['customer-shell', { 'embedded-customer': embedded }]">
+    <header v-if="!embedded" class="consumer-bar">
       <div class="consumer-bar-inner">
         <BrandMark />
         <span v-if="visit" class="consumer-tenant">{{ visit.user.tenantName }}</span>
@@ -276,9 +279,11 @@ onUnmounted(() => {
       </header>
       <p class="feedback" role="status" aria-live="polite">{{ feedback }}</p>
       <template v-if="admin">
+        <AnalyticsDashboard v-if="adminView === 'analytics'" :key="`analytics:${visit.sid}`" :sid="visit.sid" @expired="recheckAccess" />
         <TenantManagement v-show="adminView === 'management'" :key="`management:${visit.sid}`" :sid="visit.sid"
           @notice="feedback = $event" @expired="recheckAccess" />
-        <SupportAdmin v-show="adminView !== 'management'" :key="`support:${visit.sid}`" :sid="visit.sid" :view="adminView === 'management' ? 'rules' : adminView" @expired="recheckAccess" />
+        <SupportAdmin v-show="adminView !== 'management' && adminView !== 'analytics'" :key="`support:${visit.sid}`" :sid="visit.sid"
+          :view="adminView === 'rules' || adminView === 'replies' || adminView === 'sites' ? adminView : 'rules'" @expired="recheckAccess" />
       </template>
       <p v-else-if="staff && !chat" class="surface empty-state">暂无部门权限，请联系租户管理员。</p>
       <ChatPanel v-if="chat" :key="`${chat.sid}:${chat.accessVersion ?? ''}`" v-bind="chat" @expired="recheckAccess" />

@@ -46,22 +46,27 @@ class SupportSettingsController {
     @GetMapping("/quick-replies")
     ResponseEntity<List<QuickReply>> replies(HttpServletRequest request) {
         var actor = identity.authenticate(request, ChatIdentity.Side.STAFF, false);
-        return ok(jdbc.sql("SELECT id, title, body FROM quick_reply WHERE tenant_id = ? ORDER BY title, id")
-                .param(actor.tenantId()).query((rs, row) -> new QuickReply(rs.getString(1), rs.getString(2), rs.getString(3))).list());
+        return ok(jdbc.sql("""
+                SELECT id, title, body, owner_staff_id IS NOT NULL AS personal
+                FROM quick_reply
+                WHERE tenant_id = ? AND (owner_staff_id IS NULL OR owner_staff_id = ?)
+                ORDER BY personal ASC, title, id
+                """).params(actor.tenantId(), actor.id())
+                .query((rs, row) -> new QuickReply(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBoolean(4))).list());
     }
 
     @PostMapping("/quick-replies")
     ResponseEntity<QuickReply> create(@Valid @RequestBody ReplyInput input, HttpServletRequest request) {
         long tenant = admin(request, true);
-        var reply = new QuickReply(UUID.randomUUID().toString(), input.title().strip(), input.body().strip());
-        jdbc.sql("INSERT INTO quick_reply (tenant_id, id, title, body) VALUES (?, ?, ?, ?)")
+        var reply = new QuickReply(UUID.randomUUID().toString(), input.title().strip(), input.body().strip(), false);
+        jdbc.sql("INSERT INTO quick_reply (tenant_id, id, title, body, owner_staff_id) VALUES (?, ?, ?, ?, NULL)")
                 .params(tenant, reply.id(), reply.title(), reply.body()).update();
         return ResponseEntity.status(201).cacheControl(CacheControl.noStore()).body(reply);
     }
 
     @PutMapping("/quick-replies/{id}")
     ResponseEntity<Void> edit(@PathVariable String id, @Valid @RequestBody ReplyInput input, HttpServletRequest request) {
-        int count = jdbc.sql("UPDATE quick_reply SET title = ?, body = ? WHERE tenant_id = ? AND id = ?")
+        int count = jdbc.sql("UPDATE quick_reply SET title = ?, body = ? WHERE tenant_id = ? AND id = ? AND owner_staff_id IS NULL")
                 .params(input.title().strip(), input.body().strip(), admin(request, true), id).update();
         if (count == 0) throw IdentityError.notFound();
         return done();
@@ -69,7 +74,27 @@ class SupportSettingsController {
 
     @DeleteMapping("/quick-replies/{id}")
     ResponseEntity<Void> delete(@PathVariable String id, HttpServletRequest request) {
-        if (jdbc.sql("DELETE FROM quick_reply WHERE tenant_id = ? AND id = ?").params(admin(request, true), id).update() == 0) {
+        if (jdbc.sql("DELETE FROM quick_reply WHERE tenant_id = ? AND id = ? AND owner_staff_id IS NULL")
+                .params(admin(request, true), id).update() == 0) {
+            throw IdentityError.notFound();
+        }
+        return done();
+    }
+
+    @PostMapping("/quick-replies/personal")
+    ResponseEntity<QuickReply> createPersonal(@Valid @RequestBody ReplyInput input, HttpServletRequest request) {
+        var actor = identity.authenticate(request, ChatIdentity.Side.STAFF, true);
+        var reply = new QuickReply(UUID.randomUUID().toString(), input.title().strip(), input.body().strip(), true);
+        jdbc.sql("INSERT INTO quick_reply (tenant_id, id, title, body, owner_staff_id) VALUES (?, ?, ?, ?, ?)")
+                .params(actor.tenantId(), reply.id(), reply.title(), reply.body(), actor.id()).update();
+        return ResponseEntity.status(201).cacheControl(CacheControl.noStore()).body(reply);
+    }
+
+    @DeleteMapping("/quick-replies/personal/{id}")
+    ResponseEntity<Void> deletePersonal(@PathVariable String id, HttpServletRequest request) {
+        var actor = identity.authenticate(request, ChatIdentity.Side.STAFF, true);
+        if (jdbc.sql("DELETE FROM quick_reply WHERE tenant_id = ? AND id = ? AND owner_staff_id = ?")
+                .params(actor.tenantId(), id, actor.id()).update() == 0) {
             throw IdentityError.notFound();
         }
         return done();
@@ -87,5 +112,5 @@ class SupportSettingsController {
     static ResponseEntity<Void> done() { return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build(); }
 
     record ReplyInput(@NotBlank @Size(max = 80) String title, @NotBlank @Size(max = 4000) String body) {}
-    record QuickReply(String id, String title, String body) {}
+    record QuickReply(String id, String title, String body, boolean personal) {}
 }

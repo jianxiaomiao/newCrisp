@@ -37,22 +37,33 @@ class NexusStore {
                 rs.getString("integration_id"), rs.getBytes("secret_hash"))).optional();
     }
 
-    void createGrant(byte[] hash, IntegrationKey key, long userId, long sessionId, LocalDateTime expiresAt) {
+    void createGrant(byte[] hash, IntegrationKey key, long userId, long sessionId, LocalDateTime expiresAt,
+                     ProfileSnapshot profile) {
         jdbc.sql("""
-                INSERT INTO launch_grant (token_hash, tenant_id, integration_id, external_user_id, external_session_id, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """).params(hash, key.tenantId(), key.integrationId(), userId, sessionId, expiresAt).update();
+                INSERT INTO launch_grant (token_hash, tenant_id, integration_id, external_user_id, external_session_id,
+                    expires_at, customer_name, customer_email, customer_phone, customer_avatar, customer_attributes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """).params(hash, key.tenantId(), key.integrationId(), userId, sessionId, expiresAt,
+                profile == null ? null : profile.displayName(),
+                profile == null ? null : profile.email(),
+                profile == null ? null : profile.phone(),
+                profile == null ? null : profile.avatarUrl(),
+                profile == null ? null : profile.attributesJson()).update();
     }
 
     Optional<Grant> availableGrant(byte[] hash, LocalDateTime now) {
         return jdbc.sql("""
-                SELECT g.tenant_id, g.integration_id, g.external_user_id, g.external_session_id, i.nexus_origin
+                SELECT g.tenant_id, g.integration_id, g.external_user_id, g.external_session_id, i.nexus_origin,
+                       g.customer_name, g.customer_email, g.customer_phone, g.customer_avatar, g.customer_attributes
                 FROM launch_grant g JOIN integration i ON i.tenant_id = g.tenant_id AND i.id = g.integration_id
                 JOIN tenant t ON t.id = g.tenant_id
                 WHERE g.token_hash = ? AND g.consumed_at IS NULL AND g.expires_at > ? AND i.enabled AND t.status = 'ACTIVE'
                 """).params(hash, now).query((rs, row) -> new Grant(rs.getLong("tenant_id"),
                 rs.getString("integration_id"), rs.getLong("external_user_id"), rs.getLong("external_session_id"),
-                rs.getString("nexus_origin"))).optional();
+                rs.getString("nexus_origin"),
+                new ProfileSnapshot(rs.getString("customer_name"), rs.getString("customer_email"),
+                        rs.getString("customer_phone"), rs.getString("customer_avatar"),
+                        rs.getString("customer_attributes")))).optional();
     }
 
     boolean consumeGrant(byte[] hash, String origin, LocalDateTime now) {
@@ -64,11 +75,27 @@ class NexusStore {
                 """).params(now, hash, now, origin).update() == 1;
     }
 
-    String createSession(String sid, Grant grant, LocalDateTime expiresAt, LocalDateTime verifiedUntil) {
+    String createSession(String sid, Grant grant, LocalDateTime expiresAt, LocalDateTime verifiedUntil, LocalDateTime now) {
+        var profile = grant.profile();
+        boolean hasProfile = profile != null && !profile.empty();
         jdbc.sql("""
-                INSERT INTO customer (tenant_id, id, integration_id, external_user_id) VALUES (?, ?, ?, ?)
-                ON DUPLICATE KEY UPDATE external_user_id = customer.external_user_id
-                """).params(grant.tenantId(), UUID.randomUUID().toString(), grant.integrationId(), grant.userId()).update();
+                INSERT INTO customer (tenant_id, id, integration_id, external_user_id,
+                    display_name, email, phone, avatar_url, attributes, profile_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    display_name = COALESCE(VALUES(display_name), customer.display_name),
+                    email = COALESCE(VALUES(email), customer.email),
+                    phone = COALESCE(VALUES(phone), customer.phone),
+                    avatar_url = COALESCE(VALUES(avatar_url), customer.avatar_url),
+                    attributes = COALESCE(VALUES(attributes), customer.attributes),
+                    profile_updated_at = COALESCE(VALUES(profile_updated_at), customer.profile_updated_at)
+                """).params(grant.tenantId(), UUID.randomUUID().toString(), grant.integrationId(), grant.userId(),
+                hasProfile ? profile.displayName() : null,
+                hasProfile ? profile.email() : null,
+                hasProfile ? profile.phone() : null,
+                hasProfile ? profile.avatarUrl() : null,
+                hasProfile ? profile.attributesJson() : null,
+                hasProfile ? now : null).update();
         String customerId = jdbc.sql("""
                 SELECT id FROM customer WHERE tenant_id = ? AND integration_id = ? AND external_user_id = ?
                 """).params(grant.tenantId(), grant.integrationId(), grant.userId()).query(String.class).single();
@@ -78,6 +105,29 @@ class NexusStore {
                 """).params(IdentityTokens.digest("session:" + sid), sid, grant.tenantId(), customerId,
                 grant.sessionId(), expiresAt, verifiedUntil).update();
         return customerId;
+    }
+
+    void updateCustomerContext(long tenantId, String customerId, boolean guest, String displayName, String email,
+                               String pageUrl, String userAgent, LocalDateTime now) {
+        if (guest) {
+            jdbc.sql("""
+                    UPDATE customer SET
+                        display_name = COALESCE(?, display_name),
+                        email = COALESCE(?, email),
+                        last_page_url = COALESCE(?, last_page_url),
+                        last_user_agent = COALESCE(?, last_user_agent),
+                        profile_updated_at = ?
+                    WHERE tenant_id = ? AND id = ?
+                    """).params(displayName, email, pageUrl, userAgent, now, tenantId, customerId).update();
+        } else {
+            jdbc.sql("""
+                    UPDATE customer SET
+                        last_page_url = COALESCE(?, last_page_url),
+                        last_user_agent = COALESCE(?, last_user_agent),
+                        profile_updated_at = ?
+                    WHERE tenant_id = ? AND id = ?
+                    """).params(pageUrl, userAgent, now, tenantId, customerId).update();
+        }
     }
 
     Optional<CustomerSession> session(String sid, LocalDateTime now) {
@@ -103,7 +153,16 @@ class NexusStore {
     }
 
     record IntegrationKey(long tenantId, String integrationId, byte[] secretHash) {}
-    record Grant(long tenantId, String integrationId, long userId, long sessionId, String origin) {}
+    record ProfileSnapshot(String displayName, String email, String phone, String avatarUrl, String attributesJson) {
+        boolean empty() {
+            return displayName == null && email == null && phone == null && avatarUrl == null && attributesJson == null;
+        }
+    }
+    record Grant(long tenantId, String integrationId, long userId, long sessionId, String origin, ProfileSnapshot profile) {
+        Grant(long tenantId, String integrationId, long userId, long sessionId, String origin) {
+            this(tenantId, integrationId, userId, sessionId, origin, null);
+        }
+    }
     record CustomerProfile(String customerId, String tenantCode, String tenantName) {}
     record CustomerSession(CustomerProfile profile, long userId, long sessionId, LocalDateTime verifiedUntil,
                            long tenantId, String departmentId, boolean guest) {

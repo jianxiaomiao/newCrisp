@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, shallowRef } from 'vue';
+import { onMounted, onUnmounted, ref, shallowRef } from 'vue';
 import { Connection, Headset } from '@element-plus/icons-vue';
 import ChatPanel from './ChatPanel.vue';
 
@@ -17,7 +17,30 @@ const showCode = ref(false);
 const previousCode = ref('');
 let resume: string | null = null;
 let connecting: Promise<void> | undefined;
+let latestPageUrl: string | null = null;
 try { resume = localStorage.getItem(key); } catch { /* browser partitions may disable storage */ }
+
+async function reportPageContext() {
+  if (!visitor.value || !latestPageUrl) return;
+  try {
+    await auth.request('/api/v1/customer/context', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pageUrl: latestPageUrl }),
+    }, visitor.value.token.sessionId);
+  } catch { /* non-blocking context report */ }
+}
+
+function onParentMessage(event: MessageEvent) {
+  if (!event.data || typeof event.data !== 'object') return;
+  if (event.data.type === 'newcrisp:context' && typeof event.data.pageUrl === 'string') {
+    latestPageUrl = event.data.pageUrl;
+    void reportPageContext();
+  }
+}
+
+onMounted(() => window.addEventListener('message', onParentMessage));
+onUnmounted(() => window.removeEventListener('message', onParentMessage));
 
 async function connect() {
   if (connecting) return connecting;
@@ -33,6 +56,7 @@ async function connect() {
       try { localStorage.setItem(key, next.resume); } catch { /* keep the code in memory */ }
     }
     visitor.value = next;
+    void reportPageContext();
   })();
   connecting = run;
   try { await run; }
