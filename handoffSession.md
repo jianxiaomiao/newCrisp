@@ -36,7 +36,8 @@
 | 2026-11-26 | 交接文档建立 | 创建 `handoffSession.md`，规划源码级内部/外部链路学习路线。 |
 | 2026-11-27 | 源码全景学习完成 | 完成第 4 节全部 8 个模块的源码精读与链路梳理（数据模型、Nexus 接入、悬浮窗与接续、JWT 轮换与 RBAC、WS 与 Outbox 补偿、状态机与调度、协作/附件/统计、前端工程与双界面 UI）。 |
 | 2026-11-27 | 对外 SaaS 官网 + 平台管理台 (`b88ba42`) | 新增 SaaS 官网首页（`/` → `LandingPage.vue`）与公开租户自助注册（`PublicOnboardingController`，支持保留字拦截、IP 限流、开关控制 `NEWCRISP_SELF_SIGNUP_ENABLED`，注册后自动登录跳转 `/staff.html`，支持 `NEWCRISP_LANDING_DEMO_SITE_ID` 挂载活体悬浮窗）；新增平台超管控制台（`/platform.html` → `PlatformPage.vue` + `PlatformStore` + 扩展 `PlatformController`），支持 Platform Key 签发 `HttpOnly` Cookie 会话（兼容原 Bearer Key）、全平台概览 KPI、租户搜索筛选、新建租户、启用/停用（同步吊销员工会话）、配置/轮换 Nexus 集成与重置租户管理员密码。单测 35/35 通过。 |
-| 2026-11-27 | 注册算术图形验证码 + QQ 邮箱验证码 | 新增 `V13__email_verification.sql`（`email_verification_code` 表）、`ArithmeticCaptchaService`（2 数加减乘除 SVG 验证码，除法反推保证除数 ≥ 2 且整除、减法非负、一次性消费）、`EmailVerificationService` + `EmailVerificationStore`（QQ SMTP SSL 465 发信、6 位 SHA-256 哈希存储、5 分钟有效、60s 冷却/日限 10 次/IP 限流/错 5 次作废）；官网注册表单集成「图形验证码 → 获取邮箱验证码 → 提交注册」联动，支持 `NEWCRISP_SIGNUP_VERIFICATION_ENABLED` 开关。单测 37/37 通过。 |
+| 2026-11-27 | 注册算术图形验证码 + QQ 邮箱验证码 (`3ac1606`) | 新增 `V13__email_verification.sql`（`email_verification_code` 表）、`ArithmeticCaptchaService`（2 数加减乘除 SVG 验证码，除法反推保证除数 ≥ 2 且整除、减法非负、一次性消费）、`EmailVerificationService` + `EmailVerificationStore`（QQ SMTP SSL 465 发信、6 位 SHA-256 哈希存储、5 分钟有效、60s 冷却/日限 10 次/IP 限流/错 5 次作废）；官网注册表单集成「图形验证码 → 获取邮箱验证码 → 提交注册」联动，支持 `NEWCRISP_SIGNUP_VERIFICATION_ENABLED` 开关。单测 37/37 通过并实测 QQ 邮箱收信成功。 |
+| 2026-11-27 | GitHub Actions CI 配置 | 新增 `.github/workflows/ci.yml`，在 `push`/`PR` 到 `main` 时自动执行 `build-and-unit`（Node 22 `vue-tsc` + `vite build`、Java 21 `mvn test`）与 `e2e`（隔离 MySQL 8.4 Docker + Flyway V1~V13 + Playwright Chromium 端到端回归，失败自动上传截图/日志）。 |
 
 ---
 
