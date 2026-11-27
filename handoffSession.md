@@ -35,7 +35,8 @@
 | 2026-11-25 | 悬浮窗 UX 优化 (`1c696a2`) | 将悬浮窗（访客 + `embed=1`）改造为双界面：默认对话页输入框贴底，顶部左上角 `<` 切入「全部/历史会话」列表（最新会话置顶），访客接续码收纳至顶部标题栏右侧。 |
 | 2026-11-26 | 交接文档建立 | 创建 `handoffSession.md`，规划源码级内部/外部链路学习路线。 |
 | 2026-11-27 | 源码全景学习完成 | 完成第 4 节全部 8 个模块的源码精读与链路梳理（数据模型、Nexus 接入、悬浮窗与接续、JWT 轮换与 RBAC、WS 与 Outbox 补偿、状态机与调度、协作/附件/统计、前端工程与双界面 UI）。 |
-| 2026-11-27 | 对外 SaaS 官网 + 平台管理台 | 新增 SaaS 官网首页（`/` → `LandingPage.vue`）与公开租户自助注册（`PublicOnboardingController`，支持保留字拦截、IP 限流、开关控制 `NEWCRISP_SELF_SIGNUP_ENABLED`，注册后自动登录跳转 `/staff.html`，支持 `NEWCRISP_LANDING_DEMO_SITE_ID` 挂载活体悬浮窗）；新增平台超管控制台（`/platform.html` → `PlatformPage.vue` + `PlatformStore` + 扩展 `PlatformController`），支持 Platform Key 签发 `HttpOnly` Cookie 会话（兼容原 Bearer Key）、全平台概览 KPI、租户搜索筛选、新建租户、启用/停用（同步吊销员工会话）、配置/轮换 Nexus 集成与重置租户管理员密码。单测 35/35 通过。 |
+| 2026-11-27 | 对外 SaaS 官网 + 平台管理台 (`b88ba42`) | 新增 SaaS 官网首页（`/` → `LandingPage.vue`）与公开租户自助注册（`PublicOnboardingController`，支持保留字拦截、IP 限流、开关控制 `NEWCRISP_SELF_SIGNUP_ENABLED`，注册后自动登录跳转 `/staff.html`，支持 `NEWCRISP_LANDING_DEMO_SITE_ID` 挂载活体悬浮窗）；新增平台超管控制台（`/platform.html` → `PlatformPage.vue` + `PlatformStore` + 扩展 `PlatformController`），支持 Platform Key 签发 `HttpOnly` Cookie 会话（兼容原 Bearer Key）、全平台概览 KPI、租户搜索筛选、新建租户、启用/停用（同步吊销员工会话）、配置/轮换 Nexus 集成与重置租户管理员密码。单测 35/35 通过。 |
+| 2026-11-27 | 注册算术图形验证码 + QQ 邮箱验证码 | 新增 `V13__email_verification.sql`（`email_verification_code` 表）、`ArithmeticCaptchaService`（2 数加减乘除 SVG 验证码，除法反推保证除数 ≥ 2 且整除、减法非负、一次性消费）、`EmailVerificationService` + `EmailVerificationStore`（QQ SMTP SSL 465 发信、6 位 SHA-256 哈希存储、5 分钟有效、60s 冷却/日限 10 次/IP 限流/错 5 次作废）；官网注册表单集成「图形验证码 → 获取邮箱验证码 → 提交注册」联动，支持 `NEWCRISP_SIGNUP_VERIFICATION_ENABLED` 开关。单测 37/37 通过。 |
 
 ---
 
@@ -44,7 +45,7 @@
 ### 3.1 后端：认证、多租户与接入（`src/main/java/com/newcrisp/identity/`）
 - **配置与基础工具**：`IdentityConfiguration.java`、`IdentityHttp.java`、`IdentityError.java`、`ChatIdentity.java`
 - **令牌与会话轮换**：`AccessJwt.java`、`IdentityTokens.java`、`WebTokens.java`、`TokenStore.java`、`WebSessionController.java`
-- **平台与租户后台**：`PlatformController.java`、`PlatformStore.java`、`PublicOnboardingController.java`、`TenantManagementController.java`、`TenantManagementService.java`、`TenantManagementStore.java`、`SupportSettingsController.java`
+- **平台与租户后台**：`PlatformController.java`、`PlatformStore.java`、`PublicOnboardingController.java`、`ArithmeticCaptchaService.java`、`EmailVerificationService.java`、`EmailVerificationStore.java`、`TenantManagementController.java`、`TenantManagementService.java`、`TenantManagementStore.java`、`SupportSettingsController.java`
 - **员工认证**：`StaffController.java`、`StaffService.java`、`StaffStore.java`
 - **Nexus 外部接入链路**：`NexusLaunchService.java`、`NexusSessionVerifier.java`、`NexusStore.java`、`CustomerController.java`
 - **访客悬浮窗接入链路**：`GuestChatController.java`、`GuestChatService.java`
@@ -61,6 +62,7 @@
 - `V10__customer_profile_and_context.sql`：客户画像字段、上下文 `last_page_url`
 - `V11__collaboration_and_automation.sql`：`conversation_note`、`tag`、`conversation_tag`、欢迎语与自动关闭配置
 - `V12__csat_analytics_and_storage.sql`：`conversation_rating`、`first_staff_reply_at`、存储扩展字段
+- `V13__email_verification.sql`：`email_verification_code`（注册邮箱验证码哈希、防爆破计数与频率限流索引）
 
 ### 3.4 前端（`web/`）
 - **入口与基础设施**：`main.ts`（页面路由分发 + Element Plus 按需注册）、`api.ts`、`web-session.ts`、`chat-utils.ts`、`confirmation.ts`、`staff-notifications.ts`、`identity.css`

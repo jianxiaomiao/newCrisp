@@ -31,12 +31,18 @@ class PublicOnboardingController {
     private static final int MAX_TRACKED_IPS = 4096;
 
     private final StaffService staff;
+    private final ArithmeticCaptchaService captcha;
+    private final EmailVerificationService emailVerification;
     private final IdentityConfiguration.Settings settings;
     private final Clock clock;
     private final ConcurrentHashMap<String, Deque<Instant>> rateLimits = new ConcurrentHashMap<>();
 
-    PublicOnboardingController(StaffService staff, IdentityConfiguration.Settings settings, Clock clock) {
+    PublicOnboardingController(StaffService staff, ArithmeticCaptchaService captcha,
+                               EmailVerificationService emailVerification,
+                               IdentityConfiguration.Settings settings, Clock clock) {
         this.staff = staff;
+        this.captcha = captcha;
+        this.emailVerification = emailVerification;
         this.settings = settings;
         this.clock = clock;
     }
@@ -45,7 +51,28 @@ class PublicOnboardingController {
     ResponseEntity<PublicConfig> config() {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .body(new PublicConfig(settings.isSelfSignupEnabled(),
+                        settings.isSignupVerificationEnabled(),
                         settings.landingDemoSiteId().isEmpty() ? null : settings.landingDemoSiteId()));
+    }
+
+    @GetMapping("/captcha")
+    ResponseEntity<ArithmeticCaptchaService.CaptchaView> captcha() {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(captcha.issue());
+    }
+
+    @PostMapping(value = "/email-codes", consumes = MediaType.APPLICATION_JSON_VALUE)
+    ResponseEntity<EmailCodeSent> sendEmailCode(@Valid @RequestBody EmailCodeRequest input, HttpServletRequest request) {
+        IdentityHttp.requireOrigin(request, settings.publicOrigin());
+        if (!settings.isSelfSignupEnabled()) {
+            throw new IdentityError(HttpStatus.FORBIDDEN, "SELF_SIGNUP_DISABLED");
+        }
+        if (!captcha.verifyAndConsume(input.captchaId(), input.captchaAnswer())) {
+            throw new IdentityError(HttpStatus.BAD_REQUEST, "INVALID_CAPTCHA");
+        }
+        emailVerification.sendSignupCode(input.email(), request.getRemoteAddr());
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(new EmailCodeSent((int) EmailVerificationService.EMAIL_COOLDOWN.toSeconds(),
+                        (int) EmailVerificationService.CODE_TTL.toSeconds()));
     }
 
     @PostMapping(value = "/tenants/register", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -58,6 +85,9 @@ class PublicOnboardingController {
             throw new IdentityError(HttpStatus.BAD_REQUEST, "RESERVED_TENANT_CODE");
         }
         checkRateLimit(request.getRemoteAddr());
+        if (settings.isSignupVerificationEnabled()) {
+            emailVerification.verifyAndConsumeSignupCode(input.adminEmail(), input.emailCode());
+        }
         staff.provision(input.code(), input.name(), input.adminEmail(), input.adminPassword());
         var issued = staff.login(input.code(), input.adminEmail(), input.adminPassword());
         return ResponseEntity.status(HttpStatus.CREATED).cacheControl(CacheControl.noStore())
@@ -84,10 +114,15 @@ class PublicOnboardingController {
         }
     }
 
-    record PublicConfig(boolean selfSignupEnabled, String landingDemoSiteId) {}
+    record PublicConfig(boolean selfSignupEnabled, boolean signupVerificationEnabled, String landingDemoSiteId) {}
+    record EmailCodeRequest(@NotBlank @Email @Size(max = 254) String email,
+                            @NotBlank @Size(max = 64) String captchaId,
+                            @NotBlank @Size(max = 16) String captchaAnswer) {}
+    record EmailCodeSent(int cooldownSeconds, int expiresInSeconds) {}
     record SelfSignup(@NotBlank @Pattern(regexp = StaffController.TENANT_CODE) String code,
                       @NotBlank @Size(max = 120) String name,
                       @NotBlank @Email @Size(max = 254) String adminEmail,
-                      @NotBlank @Size(max = 72) String adminPassword) {}
+                      @NotBlank @Size(max = 72) String adminPassword,
+                      @Size(max = 12) String emailCode) {}
     record RegisteredTenant(String code, String name, AccessJwt.Token access) {}
 }

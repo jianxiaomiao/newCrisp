@@ -6,16 +6,24 @@ import { responseError } from './api';
 
 const publicOrigin = window.location.origin;
 const selfSignupEnabled = ref(true);
+const signupVerificationEnabled = ref(true);
 const submitting = ref(false);
+const sendingCode = ref(false);
+const cooldown = ref(0);
+const captchaId = ref('');
+const captchaImage = ref('');
+const captchaAnswer = ref('');
 const feedback = ref('');
 const feedbackType = ref<'info' | 'error' | 'success'>('info');
 let demoScriptEl: HTMLScriptElement | null = null;
+let cooldownTimer: number | undefined;
 
 const form = reactive({
   name: '',
   code: '',
   adminEmail: '',
   adminPassword: '',
+  emailCode: '',
 });
 
 const features = [
@@ -33,15 +41,96 @@ const signupErrors = new Map([
   ['INVALID_ADMIN_PASSWORD', '密码长度需在 12 到 72 个字符之间。'],
   ['SELF_SIGNUP_DISABLED', '当前平台已关闭自助注册，请联系平台管理员开通。'],
   ['TOO_MANY_SIGNUPS', '注册过于频繁，请稍后再试。'],
+  ['INVALID_CAPTCHA', '图形算术验证码不正确或已过期，已为你换一题，请重新计算。'],
+  ['INVALID_EMAIL_CODE', '邮箱验证码不正确或已过期，请核对后重试。'],
+  ['EMAIL_CODE_COOLDOWN', '发送过于频繁，请 60 秒后再获取邮箱验证码。'],
+  ['EMAIL_CODE_DAILY_LIMIT', '该邮箱今日发送次数已达上限，请明天再试。'],
+  ['EMAIL_CODE_RATE_LIMIT', '当前网络请求过于频繁，请稍后再试。'],
+  ['MAIL_NOT_CONFIGURED', '服务端尚未配置 SMTP 邮件发信参数（NEWCRISP_MAIL_USERNAME / NEWCRISP_MAIL_PASSWORD）。'],
+  ['MAIL_SEND_FAILED', '验证码邮件发送失败，请检查邮箱地址是否正确或稍后重试。'],
   ['INVALID_REQUEST', '请检查输入格式：租户代码需以小写字母开头，3–48 位小写字母、数字或连字符。'],
 ]);
+
+async function refreshCaptcha() {
+  try {
+    const res = await fetch('/api/v1/public/captcha', { cache: 'no-store', signal: AbortSignal.timeout(6000) });
+    if (!res.ok) return;
+    const data: { captchaId: string; imageDataUrl: string } = await res.json();
+    captchaId.value = data.captchaId;
+    captchaImage.value = data.imageDataUrl;
+    captchaAnswer.value = '';
+  } catch { /* ignore transient error */ }
+}
+
+function startCooldown(seconds: number) {
+  window.clearInterval(cooldownTimer);
+  cooldown.value = seconds;
+  cooldownTimer = window.setInterval(() => {
+    if (cooldown.value <= 1) {
+      cooldown.value = 0;
+      window.clearInterval(cooldownTimer);
+    } else {
+      cooldown.value -= 1;
+    }
+  }, 1000);
+}
+
+async function sendEmailCode() {
+  if (sendingCode.value || cooldown.value > 0) return;
+  const email = form.adminEmail.trim();
+  if (!email) {
+    feedbackType.value = 'error';
+    feedback.value = '请先输入管理员邮箱。';
+    return;
+  }
+  if (!captchaId.value || !captchaAnswer.value.trim()) {
+    feedbackType.value = 'error';
+    feedback.value = '请先输入右侧图形算术题的计算结果。';
+    return;
+  }
+  sendingCode.value = true;
+  feedback.value = '';
+  try {
+    const res = await fetch('/api/v1/public/email-codes', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email,
+        captchaId: captchaId.value,
+        captchaAnswer: captchaAnswer.value.trim(),
+      }),
+    });
+    if (!res.ok) {
+      const err = await responseError(res);
+      feedbackType.value = 'error';
+      feedback.value = signupErrors.get(err.code) ?? '发送验证码失败，请稍后重试。';
+      void refreshCaptcha();
+      return;
+    }
+    const data: { cooldownSeconds: number } = await res.json();
+    feedbackType.value = 'success';
+    feedback.value = `验证码已发送至 ${email}，5 分钟内有效，请查收邮件（若未收到请检查垃圾箱）。`;
+    startCooldown(data.cooldownSeconds || 60);
+    void refreshCaptcha();
+  } catch {
+    feedbackType.value = 'error';
+    feedback.value = '网络异常，无法发送验证码，请稍后重试。';
+  } finally {
+    sendingCode.value = false;
+  }
+}
 
 async function loadPublicConfig() {
   try {
     const res = await fetch('/api/v1/public/config', { cache: 'no-store', signal: AbortSignal.timeout(6000) });
     if (!res.ok) return;
-    const cfg: { selfSignupEnabled: boolean; landingDemoSiteId: string | null } = await res.json();
+    const cfg: { selfSignupEnabled: boolean; signupVerificationEnabled?: boolean; landingDemoSiteId: string | null } = await res.json();
     selfSignupEnabled.value = cfg.selfSignupEnabled;
+    signupVerificationEnabled.value = cfg.signupVerificationEnabled !== false;
+    if (selfSignupEnabled.value && signupVerificationEnabled.value) {
+      void refreshCaptcha();
+    }
     if (cfg.landingDemoSiteId && !document.querySelector('script[data-newcrisp-demo]')) {
       const script = document.createElement('script');
       script.src = '/widget.js';
@@ -69,6 +158,7 @@ async function registerTenant() {
         name: form.name.trim(),
         adminEmail: form.adminEmail.trim(),
         adminPassword: form.adminPassword,
+        ...(signupVerificationEnabled.value ? { emailCode: form.emailCode.trim() } : {}),
       }),
     });
     if (!res.ok) {
@@ -90,6 +180,7 @@ async function registerTenant() {
 
 onMounted(() => void loadPublicConfig());
 onUnmounted(() => {
+  window.clearInterval(cooldownTimer);
   demoScriptEl?.remove();
   document.getElementById('newcrisp-widget-root')?.remove();
 });
@@ -234,6 +325,25 @@ onUnmounted(() => {
                   <label>管理员邮箱
                     <el-input v-model="form.adminEmail" aria-label="管理员邮箱" required type="email" maxlength="254" :prefix-icon="User" placeholder="admin@yourcompany.com" />
                   </label>
+                  <template v-if="signupVerificationEnabled">
+                    <label>图形算术验证码（点击图片可刷新）
+                      <div class="verify-row">
+                        <el-input v-model="captchaAnswer" aria-label="图形算术验证码" maxlength="10" inputmode="numeric" placeholder="输入计算结果" />
+                        <button type="button" class="captcha-img-btn" title="点击换一题" @click="refreshCaptcha">
+                          <img v-if="captchaImage" :src="captchaImage" alt="算术验证码">
+                          <span v-else>加载中…</span>
+                        </button>
+                      </div>
+                    </label>
+                    <label>邮箱验证码
+                      <div class="verify-row">
+                        <el-input v-model="form.emailCode" aria-label="邮箱验证码" required maxlength="6" inputmode="numeric" placeholder="输入 6 位邮箱验证码" />
+                        <el-button type="primary" plain :loading="sendingCode" :disabled="cooldown > 0" @click="sendEmailCode">
+                          {{ cooldown > 0 ? `${cooldown}s 后重试` : '获取验证码' }}
+                        </el-button>
+                      </div>
+                    </label>
+                  </template>
                   <label>管理员密码（12–72 位）
                     <el-input v-model="form.adminPassword" aria-label="管理员密码" required type="password" minlength="12" maxlength="72" :prefix-icon="Lock" show-password placeholder="至少 12 位安全密码" />
                   </label>

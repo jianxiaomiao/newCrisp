@@ -28,10 +28,17 @@ class IdentityConfiguration {
     @ConfigurationProperties("newcrisp.identity")
     record Settings(String publicOrigin, String platformKeySha256, String nexusVerifyUrl,
                     String nexusVerifyKey, Duration nexusVerificationTtl,
-                    Boolean selfSignupEnabled, String landingDemoSiteId) {
+                    Boolean selfSignupEnabled, Boolean signupVerificationEnabled, String landingDemoSiteId) {
         Settings(String publicOrigin, String platformKeySha256, String nexusVerifyUrl,
                  String nexusVerifyKey, Duration nexusVerificationTtl) {
-            this(publicOrigin, platformKeySha256, nexusVerifyUrl, nexusVerifyKey, nexusVerificationTtl, true, "");
+            this(publicOrigin, platformKeySha256, nexusVerifyUrl, nexusVerifyKey, nexusVerificationTtl, true, true, "");
+        }
+
+        Settings(String publicOrigin, String platformKeySha256, String nexusVerifyUrl,
+                 String nexusVerifyKey, Duration nexusVerificationTtl,
+                 Boolean selfSignupEnabled, String landingDemoSiteId) {
+            this(publicOrigin, platformKeySha256, nexusVerifyUrl, nexusVerifyKey, nexusVerificationTtl,
+                    selfSignupEnabled, true, landingDemoSiteId);
         }
 
         @ConstructorBinding
@@ -51,6 +58,7 @@ class IdentityConfiguration {
                 throw new IllegalArgumentException("Nexus verification TTL must be between 0 and 60 seconds");
             }
             selfSignupEnabled = selfSignupEnabled == null || selfSignupEnabled;
+            signupVerificationEnabled = signupVerificationEnabled == null || signupVerificationEnabled;
             landingDemoSiteId = landingDemoSiteId == null ? "" : landingDemoSiteId.strip();
         }
 
@@ -60,6 +68,10 @@ class IdentityConfiguration {
 
         boolean isSelfSignupEnabled() {
             return Boolean.TRUE.equals(selfSignupEnabled);
+        }
+
+        boolean isSignupVerificationEnabled() {
+            return Boolean.TRUE.equals(signupVerificationEnabled);
         }
     }
 

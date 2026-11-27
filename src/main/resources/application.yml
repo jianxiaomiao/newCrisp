@@ -20,6 +20,18 @@ spring:
   flyway:
     clean-disabled: true
     validate-on-migrate: true
+  mail:
+    host: ${NEWCRISP_MAIL_HOST:smtp.qq.com}
+    port: ${NEWCRISP_MAIL_PORT:465}
+    username: ${NEWCRISP_MAIL_USERNAME:}
+    password: ${NEWCRISP_MAIL_PASSWORD:}
+    default-encoding: UTF-8
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.ssl.enable: true
+      mail.smtp.connectiontimeout: 8000
+      mail.smtp.timeout: 8000
+      mail.smtp.writetimeout: 8000
 management:
   endpoints:
     web:
@@ -41,4 +53,5 @@ newcrisp:
     nexus-verify-key: ${NEWCRISP_NEXUS_VERIFY_KEY:}
     nexus-verification-ttl: ${NEWCRISP_NEXUS_VERIFICATION_TTL:60s}
     self-signup-enabled: ${NEWCRISP_SELF_SIGNUP_ENABLED:true}
+    signup-verification-enabled: ${NEWCRISP_SIGNUP_VERIFICATION_ENABLED:true}
     landing-demo-site-id: ${NEWCRISP_LANDING_DEMO_SITE_ID:}

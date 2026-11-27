@@ -509,6 +509,11 @@ button, select { font: inherit; }
 .landing-footer { margin-top: auto; border-top: 1px solid var(--line); background: #fffefacc; padding: 18px 0; color: var(--muted); font-size: .88rem; }
 .landing-footer-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .platform-kpis { margin-top: 4px; }
+.verify-row { display: flex; align-items: center; gap: 8px; width: 100%; }
+.verify-row > .el-input { flex: 1; min-width: 0; }
+.captcha-img-btn { padding: 0; border: 1px solid var(--el-border-color); border-radius: 8px; background: #f0f5ee; height: 40px; min-width: 136px; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; }
+.captcha-img-btn img { display: block; height: 38px; width: auto; }
+.captcha-img-btn:hover { border-color: var(--forest); }
 @media (max-width: 900px) {
   .landing-hero-grid, .landing-feature-grid, .landing-steps-grid, .landing-signup-card { grid-template-columns: minmax(0, 1fr); }
   .landing-links { display: none; }

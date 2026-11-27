@@ -13,7 +13,7 @@ test('the application is ready after Flyway creates the tenant table in MySQL', 
     "SELECT version, success FROM flyway_schema_history ORDER BY installed_rank; SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='tenant';",
   ], { encoding: 'utf8', timeout: 10_000 });
 
-  expect(results.trim().split(/\r?\n/)).toEqual([...Array.from({ length: 12 }, (_, i) => `${i + 1}\t1`), '1']);
+  expect(results.trim().split(/\r?\n/)).toEqual([...Array.from({ length: 13 }, (_, i) => `${i + 1}\t1`), '1']);
 });
 
 test('the packaged Vue entry pages load the theme and fit a phone viewport', async ({ page }) => {
