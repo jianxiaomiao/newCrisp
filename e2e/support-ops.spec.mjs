@@ -140,6 +140,7 @@ test('service rules, notifications, quick replies, attachments, and embedded gue
     await expect(employee.locator('.chat-log')).toContainText('订单截图.png');
     await employee.getByRole('button', { name: '预览图片' }).click();
     await expect(employee.getByRole('img', { name: '订单截图.png' })).toBeVisible();
+    await employee.keyboard.press('Escape');
     const mine = (await browserApi(employee, `${adminApi}/conversations?view=MINE`)).data.items[0];
     expect((await browserApi(outsider, `${adminApi}/conversations/${mine.id}/attachments/3`)).status).toBe(404);
     const files = `/api/v1/customer/conversations/${mine.id}/attachments`;
