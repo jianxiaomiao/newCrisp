@@ -8,7 +8,7 @@
 
 - **项目名称**：NewCrisp（对标 Crisp.chat 打造的轻量级多租户 Web 在线客服系统）
 - **核心使用场景**：
-  1. 作为主产品 **Nexus**（本地仓库 `/Users/xiaomiao/Nexus`）的内置在线客服系统（已登录用户自动携带画像进入）。
+  1. 作为主产品 **Nexus**（联调仓库 `<NEXUS_REPO_ROOT>`）的内置在线客服系统（已登录用户自动携带画像进入）。
   2. 通过单行 `<script>` 悬浮窗脚本嵌入任意外部官网（Shadow DOM 隔离，点击右下角气泡原地弹出，不跳转页面）。
 - **明确的范围约束（重要）**：
   - **暂不开发**知识库（Help Center）和 AI 客服，聚焦稳定、好用的轻量级人工客服系统。
@@ -30,7 +30,7 @@
 | :--- | :--- | :--- |
 | 2026-11-25 | 基础版本 (`8c95e49`) | 多租户认证、部门与员工管理、WebSocket 聊天、队列领取/转派/退回/结束、附件上传、营业时间、访客聊天与接续码、Element Plus 鼠尾草绿主题。 |
 | 2026-11-25 | 三阶段 Crisp 对标升级 (`b1626e6`) | **阶段一（客户画像与聊天体验）**：`V10` 迁移、Nexus `launch-grants` 同步用户资料、客户画像侧边栏与历史会话、Enter/Shift+Enter 发送、乐观发送、粘贴/拖拽传图、图片缩略图与灯箱预览、已读/未读回执、正在输入（typing）、URL 自动链接、表情、Web Audio 提示音。<br>**阶段二（悬浮窗、团队协作与自动化）**：`V11` 迁移、独立 Shadow DOM 悬浮窗 `/widget.js`、`postMessage` 桥接（页面 URL / 未读数）、独立 `conversation_note` 内部备注、会话标签、全库搜索、`/` 快捷回复与变量替换、自动欢迎语、超时自动结束后台任务（`IdleConversationWorker`）、转派交接备注。<br>**阶段三（CSAT、数据看板与架构加固）**：`V12` 迁移、1-5 星满意度评价、管理员运营数据看板（`AnalyticsDashboard.vue`）、`AttachmentStorage` SPI、WebSocket 租户级二级索引 `peersByTenant` 与客户上下线即时通知。 |
-| 2026-11-25 | Nexus 联动修改 | 修改 `/Users/xiaomiao/Nexus/nexus-server/.../NexusChatController.java`，查询 `UserMapper` 并在调用 `launch-grants` 时透传 `displayName`、`email`、`emailVerified`、`registeredAt`（已由用户单独提交）。 |
+| 2026-11-25 | Nexus 联动修改 | 修改 `<NEXUS_REPO_ROOT>/nexus-server/.../NexusChatController.java`，查询 `UserMapper` 并在调用 `launch-grants` 时透传 `displayName`、`email`、`emailVerified`、`registeredAt`（已由用户单独提交）。 |
 | 2026-11-25 | 缺陷修复 (`f4be1d8`) | 在 `web/main.ts` 补齐按需注册 `ElSelect`、`ElOption`、`ElImageViewer`。 |
 | 2026-11-25 | 悬浮窗 UX 优化 (`1c696a2`) | 将悬浮窗（访客 + `embed=1`）改造为双界面：默认对话页输入框贴底，顶部左上角 `<` 切入「全部/历史会话」列表（最新会话置顶），访客接续码收纳至顶部标题栏右侧。 |
 | 2026-11-26 | 交接文档建立 | 创建 `handoffSession.md`，规划源码级内部/外部链路学习路线。 |
@@ -77,9 +77,9 @@
   - `AttachmentMessage.vue`：附件下载、图片自动缩略图与灯箱预览
   - `TenantManagement.vue`、`SupportAdmin.vue`、`AnalyticsDashboard.vue`、`BrandMark.vue`
 
-### 3.5 Nexus 侧联调入口（`/Users/xiaomiao/Nexus`）
-- 后端：`/Users/xiaomiao/Nexus/nexus-server/src/main/java/com/nexus/supportchat/NexusChatController.java`
-- 前端：`/Users/xiaomiao/Nexus/nexus-console`（通过 `VITE_NEXUS_CHAT_ENABLED=true` 启用在线客服入口）
+### 3.5 Nexus 侧联调入口（`<NEXUS_REPO_ROOT>`）
+- 后端：`<NEXUS_REPO_ROOT>/nexus-server/src/main/java/com/nexus/supportchat/NexusChatController.java`
+- 前端：`<NEXUS_REPO_ROOT>/nexus-console`（通过 `VITE_NEXUS_CHAT_ENABLED=true` 启用在线客服入口）
 
 ---
 
@@ -118,15 +118,9 @@
 
 ## 6. 本地开发环境与常用命令
 
-- **本机工具链路径（macOS）**：
-  - Node / npm：`/Applications/HBuilderX.app/Contents/HBuilderX/plugins/node` 与 `.../plugins/npm`
-  - Maven：`/Applications/IntelliJ IDEA.app/Contents/plugins/maven/lib/maven3/bin/mvn`
-  - GitHub 推送私钥：`~/.ssh/nexus_github_ed25519`
+- **前置依赖**：JDK 21、Maven 3.9+、Node.js 20.19+ / 22.12+、npm、Docker。
 - **常用命令**：
   ```bash
-  # 设置 PATH
-  export PATH="/Applications/HBuilderX.app/Contents/HBuilderX/plugins/node:/Applications/HBuilderX.app/Contents/HBuilderX/plugins/npm:/Applications/IntelliJ IDEA.app/Contents/plugins/maven/lib/maven3/bin:$PATH"
-
   # 前端类型检查与构建
   npm run build
 
@@ -134,11 +128,11 @@
   mvn test
   mvn -q package -DskipTests
 
-  # 全量真实 MySQL 8.4 + Nexus Playwright E2E（需先启动 Docker Desktop）
-  NEWCRISP_E2E_NEXUS_ROOT=/Users/xiaomiao/Nexus npm run test:e2e
+  # 真实 MySQL 8.4 + Playwright E2E（需先启动 Docker）
+  npm run test:e2e
 
-  # 推送 GitHub
-  GIT_SSH_COMMAND="ssh -i ~/.ssh/nexus_github_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes" git push origin main
+  # 联合 Nexus 的全量 E2E
+  NEWCRISP_E2E_NEXUS_ROOT=/path/to/Nexus npm run test:e2e
   ```
 
 ---
