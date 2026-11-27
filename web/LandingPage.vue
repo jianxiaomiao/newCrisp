@@ -13,6 +13,7 @@ const cooldown = ref(0);
 const captchaId = ref('');
 const captchaImage = ref('');
 const captchaAnswer = ref('');
+const captchaConsumed = ref(false);
 const feedback = ref('');
 const feedbackType = ref<'info' | 'error' | 'success'>('info');
 let demoScriptEl: HTMLScriptElement | null = null;
@@ -59,6 +60,7 @@ async function refreshCaptcha() {
     captchaId.value = data.captchaId;
     captchaImage.value = data.imageDataUrl;
     captchaAnswer.value = '';
+    captchaConsumed.value = false;
   } catch { /* ignore transient error */ }
 }
 
@@ -81,6 +83,12 @@ async function sendEmailCode() {
   if (!email) {
     feedbackType.value = 'error';
     feedback.value = '请先输入管理员邮箱。';
+    return;
+  }
+  if (captchaConsumed.value) {
+    feedbackType.value = 'info';
+    feedback.value = '如需重新发送邮箱验证码，请先计算新刷出的图形算术题。';
+    void refreshCaptcha();
     return;
   }
   if (!captchaId.value || !captchaAnswer.value.trim()) {
@@ -109,10 +117,10 @@ async function sendEmailCode() {
       return;
     }
     const data: { cooldownSeconds: number } = await res.json();
+    captchaConsumed.value = true;
     feedbackType.value = 'success';
     feedback.value = `验证码已发送至 ${email}，5 分钟内有效，请查收邮件（若未收到请检查垃圾箱）。`;
     startCooldown(data.cooldownSeconds || 60);
-    void refreshCaptcha();
   } catch {
     feedbackType.value = 'error';
     feedback.value = '网络异常，无法发送验证码，请稍后重试。';
