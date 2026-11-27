@@ -40,3 +40,5 @@ newcrisp:
     nexus-verify-url: ${NEWCRISP_NEXUS_VERIFY_URL:}
     nexus-verify-key: ${NEWCRISP_NEXUS_VERIFY_KEY:}
     nexus-verification-ttl: ${NEWCRISP_NEXUS_VERIFICATION_TTL:60s}
+    self-signup-enabled: ${NEWCRISP_SELF_SIGNUP_ENABLED:true}
+    landing-demo-site-id: ${NEWCRISP_LANDING_DEMO_SITE_ID:}

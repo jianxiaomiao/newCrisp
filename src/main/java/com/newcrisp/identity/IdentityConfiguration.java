@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.util.HexFormat;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -26,7 +27,14 @@ class IdentityConfiguration {
 
     @ConfigurationProperties("newcrisp.identity")
     record Settings(String publicOrigin, String platformKeySha256, String nexusVerifyUrl,
-                    String nexusVerifyKey, Duration nexusVerificationTtl) {
+                    String nexusVerifyKey, Duration nexusVerificationTtl,
+                    Boolean selfSignupEnabled, String landingDemoSiteId) {
+        Settings(String publicOrigin, String platformKeySha256, String nexusVerifyUrl,
+                 String nexusVerifyKey, Duration nexusVerificationTtl) {
+            this(publicOrigin, platformKeySha256, nexusVerifyUrl, nexusVerifyKey, nexusVerificationTtl, true, "");
+        }
+
+        @ConstructorBinding
         Settings {
             requireOrigin(publicOrigin);
             if (!platformKeySha256.isEmpty() && !platformKeySha256.matches("[a-fA-F0-9]{64}")) {
@@ -42,10 +50,16 @@ class IdentityConfiguration {
             if (nexusVerificationTtl.isNegative() || nexusVerificationTtl.compareTo(Duration.ofSeconds(60)) > 0) {
                 throw new IllegalArgumentException("Nexus verification TTL must be between 0 and 60 seconds");
             }
+            selfSignupEnabled = selfSignupEnabled == null || selfSignupEnabled;
+            landingDemoSiteId = landingDemoSiteId == null ? "" : landingDemoSiteId.strip();
         }
 
         byte[] platformDigest() {
             return HexFormat.of().parseHex(platformKeySha256);
+        }
+
+        boolean isSelfSignupEnabled() {
+            return Boolean.TRUE.equals(selfSignupEnabled);
         }
     }
 

@@ -49,7 +49,7 @@ class StaffService {
         }
     }
 
-    private String encodeNewPassword(String password) {
+    String encodeNewPassword(String password) {
         int length = password.getBytes(StandardCharsets.UTF_8).length;
         if (length < 12 || length > 72 || password.isBlank()) {
             throw new IdentityError(HttpStatus.BAD_REQUEST, "INVALID_ADMIN_PASSWORD");
